@@ -35,6 +35,8 @@ automation:
               - service: input_select.select_option
                 target: { entity_id: input_select.alfen_charge_mode }
                 data: { option: "Fast" }
+              - service: input_boolean.turn_off
+                target: { entity_id: input_boolean.laadpaal_override }
           - conditions:
               - condition: trigger
                 id: afternoon_stop
@@ -52,6 +54,8 @@ automation:
               - service: input_select.select_option
                 target: { entity_id: input_select.alfen_charge_mode }
                 data: { option: "Fast" }
+              - service: input_boolean.turn_off
+                target: { entity_id: input_boolean.laadpaal_override }
           - conditions:
               - condition: trigger
                 id: night_stop
@@ -64,3 +68,42 @@ automation:
                 data: { option: "{{ states('input_select.alfen_price_fallback') }}" }
               - service: input_boolean.turn_off
                 target: { entity_id: input_boolean.laadpaal_snachts }
+
+  # --- "Nu Laden!" button: override toggle -> Fast / back to fallback ---
+  #     The "off" branch only reverts when NO cheap window is active, so a
+  #     window opening (which clears the override) can't race the window's
+  #     own Fast selection.
+  - id: alfen_nu_laden
+    alias: Alfen Nu Laden button
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.laadpaal_override
+        to: "on"
+        id: aan
+      - trigger: state
+        entity_id: input_boolean.laadpaal_override
+        to: "off"
+        id: uit
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: aan
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "Fast" }
+          - conditions:
+              - condition: trigger
+                id: uit
+              - condition: state
+                entity_id: binary_sensor.cheapest_four_hours_afternoon
+                state: "off"
+              - condition: state
+                entity_id: binary_sensor.cheapest_four_hours_night
+                state: "off"
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "{{ states('input_select.alfen_price_fallback') }}" }
