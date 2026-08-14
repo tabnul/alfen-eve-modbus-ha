@@ -1,5 +1,5 @@
-# packages/alfen_price.yaml — site-specific price/window wiring.
-# Only drives input_select.alfen_charge_mode.
+# optional_alfen_price.yaml — site-specific price/window wiring.
+# Only drives input_select.alfen_charge_mode. NOT part of the reusable engine.
 
 automation:
   - id: alfen_price_charging
@@ -26,11 +26,6 @@ automation:
         from: "on"
         to: "off"
         id: night_stop
-      - trigger: state
-        entity_id: input_boolean.laadpaal_override
-        from: "off"
-        to: "on"
-        id: override
     actions:
       - choose:
           - conditions:
@@ -40,8 +35,6 @@ automation:
               - service: input_select.select_option
                 target: { entity_id: input_select.alfen_charge_mode }
                 data: { option: "Fast" }
-              - service: input_boolean.turn_off
-                target: { entity_id: input_boolean.laadpaal_override }
           - conditions:
               - condition: trigger
                 id: afternoon_stop
@@ -59,8 +52,6 @@ automation:
               - service: input_select.select_option
                 target: { entity_id: input_select.alfen_charge_mode }
                 data: { option: "Fast" }
-              - service: input_boolean.turn_off
-                target: { entity_id: input_boolean.laadpaal_override }
           - conditions:
               - condition: trigger
                 id: night_stop
@@ -73,10 +64,3 @@ automation:
                 data: { option: "{{ states('input_select.alfen_price_fallback') }}" }
               - service: input_boolean.turn_off
                 target: { entity_id: input_boolean.laadpaal_snachts }
-          - conditions:
-              - condition: trigger
-                id: override
-            sequence:
-              - service: input_select.select_option
-                target: { entity_id: input_select.alfen_charge_mode }
-                data: { option: "Fast" }

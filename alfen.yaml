@@ -1,7 +1,7 @@
 # packages/alfen.yaml — generic control engine. No site-specific price wiring.
 
 input_boolean:
-  alfen_protect_lockout:        # latched when protection stops the car; blocks resume
+  alfen_protect_lockout:
     name: Alfen protection lockout
 
 input_number:
@@ -52,7 +52,7 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
-  alfen_recovery_margin:        # hysteresis band: resume only when headroom >= min + this
+  alfen_recovery_margin:
     name: Alfen recovery margin
     initial: 3
     min: 0
@@ -280,7 +280,6 @@ automation:
       - service: input_boolean.turn_off
         target:
           entity_id: input_boolean.alfen_protect_lockout
-      # Kick-start if we're in Solar with a connected car sitting at stop.
       - condition: state
         entity_id: input_select.alfen_charge_mode
         state: "Solar"

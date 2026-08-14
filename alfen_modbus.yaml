@@ -1,7 +1,7 @@
 modbus:
   - name: alfen
     type: tcp
-    host: 10.10.10.10         # real charger IP (was the placeholder before)
+    host: 10.10.10.10
     port: 502
     message_wait_milliseconds: 30
     timeout: 5
@@ -162,15 +162,6 @@ modbus:
       - name: alfen_current_l3
         slave: 1
         address: 324
-        input_type: holding
-        data_type: float32
-        precision: 2
-        unit_of_measurement: A
-        device_class: current
-        state_class: measurement
-      - name: alfen_current_sum
-        slave: 1
-        address: 326
         input_type: holding
         data_type: float32
         precision: 2

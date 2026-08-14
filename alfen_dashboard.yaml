@@ -21,10 +21,14 @@ views:
                 name: Phase limit (car)
               - entity: input_number.alfen_fuse_per_phase
                 name: Fuse per phase (protection)
+              - entity: input_number.alfen_recovery_margin
+                name: Recovery margin
               - entity: input_number.alfen_min_current
                 name: Min current (6 A floor)
               - entity: input_number.alfen_stop_current
                 name: Stop current (off)
+              - entity: input_boolean.alfen_protect_lockout
+                name: Protection lockout
               - entity: input_select.alfen_price_fallback
                 name: Price fallback
           - type: button
@@ -148,7 +152,6 @@ views:
               - sensor.alfen_current_l1
               - sensor.alfen_current_l2
               - sensor.alfen_current_l3
-              - sensor.alfen_current_sum
           - type: entities
             title: Voltages
             entities:
