@@ -1,0 +1,366 @@
+modbus:
+  - name: alfen
+    type: tcp
+    host: 10.10.10.10         # real charger IP (was the placeholder before)
+    port: 502
+    message_wait_milliseconds: 30
+    timeout: 5
+    delay: 5
+
+    sensors:
+      # ---------- PRODUCT IDENTIFICATION (slave 200, static) ----------
+      - name: alfen_name
+        slave: 200
+        address: 100
+        input_type: holding
+        data_type: string
+        count: 17
+        scan_interval: 3600
+      - name: alfen_manufacturer
+        slave: 200
+        address: 117
+        input_type: holding
+        data_type: string
+        count: 5
+        scan_interval: 3600
+      - name: alfen_modbus_table_version
+        slave: 200
+        address: 122
+        input_type: holding
+        data_type: int16
+        scan_interval: 3600
+      - name: alfen_firmware_version
+        slave: 200
+        address: 123
+        input_type: holding
+        data_type: string
+        count: 17
+        scan_interval: 3600
+      - name: alfen_platform_type
+        slave: 200
+        address: 140
+        input_type: holding
+        data_type: string
+        count: 17
+        scan_interval: 3600
+      - name: alfen_station_serial
+        slave: 200
+        address: 157
+        input_type: holding
+        data_type: string
+        count: 11
+        scan_interval: 3600
+      - name: alfen_uptime
+        slave: 200
+        address: 174
+        input_type: holding
+        data_type: uint64
+        scale: 0.001
+        precision: 0
+        unit_of_measurement: s
+        device_class: duration
+        scan_interval: 300
+      - name: alfen_timezone_offset
+        slave: 200
+        address: 178
+        input_type: holding
+        data_type: int16
+        unit_of_measurement: min
+        scan_interval: 3600
+
+      # ---------- STATION STATUS (slave 200) ----------
+      - name: alfen_station_active_max_current
+        slave: 200
+        address: 1100
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        scan_interval: 30
+      - name: alfen_temperature
+        slave: 200
+        address: 1102
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        scan_interval: 30
+      - name: alfen_ocpp_state
+        slave: 200
+        address: 1104
+        input_type: holding
+        data_type: uint16
+        scan_interval: 60
+      - name: alfen_nr_of_sockets
+        slave: 200
+        address: 1105
+        input_type: holding
+        data_type: uint16
+        scan_interval: 3600
+
+      # ---------- SOCKET METER: VOLTAGE (slave 1) ----------
+      - name: alfen_voltage_l1n
+        slave: 1
+        address: 306
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: V
+        device_class: voltage
+        state_class: measurement
+      - name: alfen_voltage_l2n
+        slave: 1
+        address: 308
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: V
+        device_class: voltage
+        state_class: measurement
+      - name: alfen_voltage_l3n
+        slave: 1
+        address: 310
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: V
+        device_class: voltage
+        state_class: measurement
+
+      # ---------- SOCKET METER: CURRENT (slave 1) ----------
+      - name: alfen_current_n
+        slave: 1
+        address: 318
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+      - name: alfen_current_l1
+        slave: 1
+        address: 320
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+      - name: alfen_current_l2
+        slave: 1
+        address: 322
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+      - name: alfen_current_l3
+        slave: 1
+        address: 324
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+      - name: alfen_current_sum
+        slave: 1
+        address: 326
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+
+      # ---------- SOCKET METER: POWER FACTOR + FREQUENCY ----------
+      - name: alfen_pf_l1
+        slave: 1
+        address: 328
+        input_type: holding
+        data_type: float32
+        precision: 2
+        device_class: power_factor
+        state_class: measurement
+      - name: alfen_pf_l2
+        slave: 1
+        address: 330
+        input_type: holding
+        data_type: float32
+        precision: 2
+        device_class: power_factor
+        state_class: measurement
+      - name: alfen_pf_l3
+        slave: 1
+        address: 332
+        input_type: holding
+        data_type: float32
+        precision: 2
+        device_class: power_factor
+        state_class: measurement
+      - name: alfen_pf_sum
+        slave: 1
+        address: 334
+        input_type: holding
+        data_type: float32
+        precision: 2
+        device_class: power_factor
+        state_class: measurement
+      - name: alfen_frequency
+        slave: 1
+        address: 336
+        input_type: holding
+        data_type: float32
+        precision: 2
+        unit_of_measurement: Hz
+        device_class: frequency
+        state_class: measurement
+
+      # ---------- SOCKET METER: REAL POWER (W) ----------
+      - name: alfen_power_l1
+        slave: 1
+        address: 338
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+      - name: alfen_power_l2
+        slave: 1
+        address: 340
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+      - name: alfen_power_l3
+        slave: 1
+        address: 342
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+      - name: alfen_power_sum
+        slave: 1
+        address: 344
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+
+      # ---------- SOCKET METER: APPARENT / REACTIVE POWER ----------
+      - name: alfen_apparent_power_sum
+        slave: 1
+        address: 352
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: VA
+        device_class: apparent_power
+        state_class: measurement
+      - name: alfen_reactive_power_sum
+        slave: 1
+        address: 360
+        input_type: holding
+        data_type: float32
+        precision: 0
+        unit_of_measurement: var
+        device_class: reactive_power
+        state_class: measurement
+
+      # ---------- SOCKET METER: ENERGY (float64) ----------
+      - name: alfen_energy_delivered_sum
+        slave: 1
+        address: 374
+        input_type: holding
+        data_type: float64
+        precision: 0
+        unit_of_measurement: Wh
+        device_class: energy
+        state_class: total_increasing
+        scan_interval: 60
+      - name: alfen_energy_consumed_sum
+        slave: 1
+        address: 390
+        input_type: holding
+        data_type: float64
+        precision: 0
+        unit_of_measurement: Wh
+        device_class: energy
+        state_class: total_increasing
+        scan_interval: 60
+
+      # ---------- SOCKET STATUS / CONTROL (slave 1) ----------
+      - name: alfen_availability
+        slave: 1
+        address: 1200
+        input_type: holding
+        data_type: uint16
+        scan_interval: 10
+      - name: alfen_mode3_state
+        slave: 1
+        address: 1201
+        input_type: holding
+        data_type: string
+        count: 5
+        scan_interval: 5
+      - name: alfen_actual_applied_max_current
+        slave: 1
+        address: 1206
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        scan_interval: 5
+      - name: alfen_setpoint_valid_time
+        slave: 1
+        address: 1208
+        input_type: holding
+        data_type: uint32
+        unit_of_measurement: s
+        device_class: duration
+        scan_interval: 5
+      - name: alfen_setpoint_readback
+        slave: 1
+        address: 1210
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        scan_interval: 5
+      - name: alfen_safe_current
+        slave: 1
+        address: 1212
+        input_type: holding
+        data_type: float32
+        precision: 1
+        unit_of_measurement: A
+        device_class: current
+        scan_interval: 60
+      - name: alfen_setpoint_accounted_for
+        slave: 1
+        address: 1214
+        input_type: holding
+        data_type: uint16
+        scan_interval: 5
+      - name: alfen_phases
+        slave: 1
+        address: 1215
+        input_type: holding
+        data_type: uint16
+        scan_interval: 5

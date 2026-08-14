@@ -1,0 +1,82 @@
+# packages/alfen_price.yaml — site-specific price/window wiring.
+# Only drives input_select.alfen_charge_mode.
+
+automation:
+  - id: alfen_price_charging
+    alias: Alfen price charging (cheap windows)
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.cheapest_four_hours_afternoon
+        from: "off"
+        to: "on"
+        id: afternoon_start
+      - trigger: state
+        entity_id: binary_sensor.cheapest_four_hours_afternoon
+        from: "on"
+        to: "off"
+        id: afternoon_stop
+      - trigger: state
+        entity_id: binary_sensor.cheapest_four_hours_night
+        from: "off"
+        to: "on"
+        id: night_start
+      - trigger: state
+        entity_id: binary_sensor.cheapest_four_hours_night
+        from: "on"
+        to: "off"
+        id: night_stop
+      - trigger: state
+        entity_id: input_boolean.laadpaal_override
+        from: "off"
+        to: "on"
+        id: override
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: afternoon_start
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "Fast" }
+              - service: input_boolean.turn_off
+                target: { entity_id: input_boolean.laadpaal_override }
+          - conditions:
+              - condition: trigger
+                id: afternoon_stop
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "{{ states('input_select.alfen_price_fallback') }}" }
+          - conditions:
+              - condition: trigger
+                id: night_start
+              - condition: state
+                entity_id: input_boolean.laadpaal_snachts
+                state: "on"
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "Fast" }
+              - service: input_boolean.turn_off
+                target: { entity_id: input_boolean.laadpaal_override }
+          - conditions:
+              - condition: trigger
+                id: night_stop
+              - condition: state
+                entity_id: input_boolean.laadpaal_snachts
+                state: "on"
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "{{ states('input_select.alfen_price_fallback') }}" }
+              - service: input_boolean.turn_off
+                target: { entity_id: input_boolean.laadpaal_snachts }
+          - conditions:
+              - condition: trigger
+                id: override
+            sequence:
+              - service: input_select.select_option
+                target: { entity_id: input_select.alfen_charge_mode }
+                data: { option: "Fast" }

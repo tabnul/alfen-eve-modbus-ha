@@ -1,0 +1,173 @@
+views:
+  - title: EV Charger
+    path: ev-charger
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        title: Control
+        cards:
+          - type: tile
+            entity: input_select.alfen_charge_mode
+            name: Mode
+          - type: entities
+            title: Limits & manual
+            entities:
+              - entity: input_number.alfen_target_current
+                name: ▸ Target current (manual/live)
+              - entity: input_number.alfen_max_current
+                name: Max current (full power)
+              - entity: input_number.alfen_phase_limit
+                name: Phase limit (car)
+              - entity: input_number.alfen_fuse_per_phase
+                name: Fuse per phase (protection)
+              - entity: input_number.alfen_min_current
+                name: Min current (6 A floor)
+              - entity: input_number.alfen_stop_current
+                name: Stop current (off)
+              - entity: input_select.alfen_price_fallback
+                name: Price fallback
+          - type: button
+            name: Force 1-phase
+            icon: mdi:numeric-1-circle-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: script.alfen_switch_phases
+              data:
+                phases: 1
+          - type: button
+            name: Force 3-phase
+            icon: mdi:numeric-3-circle-outline
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: script.alfen_switch_phases
+              data:
+                phases: 3
+
+      - type: grid
+        title: Status
+        cards:
+          - type: tile
+            entity: sensor.alfen_mode3_state
+            name: Mode 3 state
+          - type: tile
+            entity: sensor.alfen_phases
+            name: Phases
+          - type: tile
+            entity: sensor.alfen_actual_applied_max_current
+            name: Applied current
+          - type: tile
+            entity: sensor.alfen_setpoint_readback
+            name: Setpoint
+          - type: tile
+            entity: sensor.alfen_setpoint_valid_time
+            name: Setpoint valid
+          - type: tile
+            entity: sensor.alfen_setpoint_accounted_for
+            name: Accounted for
+          - type: tile
+            entity: sensor.alfen_availability
+            name: Availability
+          - type: tile
+            entity: sensor.alfen_temperature
+            name: Temperature
+
+      - type: grid
+        title: Live power
+        cards:
+          - type: tile
+            entity: sensor.alfen_solar_surplus
+            name: Solar surplus
+          - type: tile
+            entity: sensor.alfen_headroom_active
+            name: Headroom (active)
+          - type: tile
+            entity: sensor.alfen_headroom_l1
+            name: Headroom L1
+          - type: tile
+            entity: sensor.alfen_headroom_l2
+            name: Headroom L2
+          - type: tile
+            entity: sensor.alfen_headroom_l3
+            name: Headroom L3
+          - type: tile
+            entity: sensor.alfen_power_sum
+            name: Charger power
+          - type: tile
+            entity: sensor.p1_meter_power
+            name: Grid power
+          - type: tile
+            entity: sensor.p1_meter_power_phase_1
+            name: Grid L1
+          - type: tile
+            entity: sensor.p1_meter_power_phase_2
+            name: Grid L2
+          - type: tile
+            entity: sensor.p1_meter_power_phase_3
+            name: Grid L3
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            header:
+              show: true
+              title: Charger power & surplus
+            graph_span: 6h
+            series:
+              - entity: sensor.alfen_power_sum
+                name: Charger
+                stroke_width: 2
+              - entity: sensor.alfen_solar_surplus
+                name: Surplus
+                stroke_width: 2
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            header:
+              show: true
+              title: Phase headroom
+            graph_span: 6h
+            series:
+              - entity: sensor.alfen_headroom_l1
+                name: L1
+                stroke_width: 2
+              - entity: sensor.alfen_headroom_l2
+                name: L2
+                stroke_width: 2
+              - entity: sensor.alfen_headroom_l3
+                name: L3
+                stroke_width: 2
+
+      - type: grid
+        title: Meter
+        cards:
+          - type: entities
+            title: Currents
+            entities:
+              - sensor.alfen_current_l1
+              - sensor.alfen_current_l2
+              - sensor.alfen_current_l3
+              - sensor.alfen_current_sum
+          - type: entities
+            title: Voltages
+            entities:
+              - sensor.alfen_voltage_l1n
+              - sensor.alfen_voltage_l2n
+              - sensor.alfen_voltage_l3n
+          - type: entities
+            title: Energy & quality
+            entities:
+              - sensor.alfen_energy_delivered_sum
+              - sensor.alfen_energy_consumed_sum
+              - sensor.alfen_frequency
+              - sensor.alfen_pf_sum
+          - type: entities
+            title: Device
+            entities:
+              - sensor.alfen_name
+              - sensor.alfen_firmware_version
+              - sensor.alfen_platform_type
+              - sensor.alfen_station_serial
+              - sensor.alfen_station_active_max_current
+              - sensor.alfen_uptime
