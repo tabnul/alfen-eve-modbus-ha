@@ -332,9 +332,27 @@ automation:
                   amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
         default: []
 
+  # --- Keep-alive: refresh 1210 every 30s while a car is connected.
+  #     STANDALONE (mode: restart) so the control queue can never delay it —
+  #     this is what keeps the charger off its safe-current fallback. ---
+  - id: alfen_setpoint_renew
+    alias: Alfen setpoint auto-renew
+    mode: restart
+    triggers:
+      - trigger: time_pattern
+        seconds: "/30"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
+    actions:
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
+
   # --- Always-on fuse protection: pause + latch lockout if ANY phase
-  #     reaches the fuse rating, in ANY mode. Kept SEPARATE (5s cadence,
-  #     mode: restart) so it always fires promptly as the safety layer. ---
+  #     reaches the fuse rating, in ANY mode. ---
   - id: alfen_fuse_guard
     alias: Alfen fuse guard
     mode: restart
@@ -407,8 +425,7 @@ automation:
         data:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
 
-  # --- Single control loop: all behaviour dispatched by trigger id.
-  #     Also carries the 30s keep-alive (renew). ---
+  # --- Single control loop: all behaviour dispatched by trigger id. ---
   - id: alfen_control
     alias: Alfen control
     mode: queued
@@ -419,9 +436,6 @@ automation:
       - trigger: time_pattern
         seconds: "/20"
         id: tick
-      - trigger: time_pattern
-        seconds: "/30"
-        id: renew
       - trigger: state
         entity_id: input_select.alfen_charge_mode
         id: mode_change
@@ -457,19 +471,6 @@ automation:
         id: phase_down
     actions:
       - choose:
-          # ===== Keep-alive: re-push target every 30s while a car is connected =====
-          - conditions:
-              - condition: trigger
-                id: renew
-              - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_mode3')
-                     not in ['A','E','F','unknown','unavailable',''] }}
-            sequence:
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
-
           # ===== Mode / car-state change: Off|disconnect -> pause (+clear lockout); Fast -> 3p max =====
           - conditions:
               - condition: trigger
