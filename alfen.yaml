@@ -1,6 +1,414 @@
-# --- Single control loop: all behaviour dispatched by trigger id.
-  #     Now also carries the 30s keep-alive (renew) that used to be its
-  #     own automation. ---
+# packages/alfen.yaml — generic control engine. No site-specific price wiring.
+
+input_boolean:
+  alfen_protect_lockout:
+    name: Alfen protection lockout
+
+input_datetime:
+  alfen_last_phase_switch:
+    name: Alfen last phase switch
+    has_date: true
+    has_time: true
+
+input_number:
+  # No initial: -> restores last value across restart.
+  alfen_target_current:
+    name: Alfen target current
+    min: 0
+    max: 32
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_min_current:
+    name: Alfen min current
+    initial: 6
+    min: 6
+    max: 16
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_max_current:
+    name: Alfen max current
+    initial: 20
+    min: 6
+    max: 32
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_stop_current:
+    name: Alfen stop current
+    initial: 5
+    min: 0
+    max: 6
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_phase_limit:
+    name: Alfen phase limit
+    initial: 16
+    min: 6
+    max: 32
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_fuse_per_phase:
+    name: Alfen fuse per phase
+    initial: 25
+    min: 6
+    max: 80
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_recovery_margin:
+    name: Alfen recovery margin
+    initial: 3
+    min: 0
+    max: 10
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_export_margin:      # W of export to keep in reserve; 0 = grid-zero, higher = stricter solar-only
+    name: Alfen export margin
+    initial: 300
+    min: 0
+    max: 1000
+    step: 50
+    mode: box
+    unit_of_measurement: W
+  alfen_phase_cooldown:     # minutes to block further phase switches after one
+    name: Alfen phase cooldown
+    initial: 10
+    min: 0
+    max: 60
+    step: 1
+    mode: box
+    unit_of_measurement: min
+
+input_select:
+  # No initial: -> restores last selected mode across restart.
+  alfen_charge_mode:
+    name: Alfen charge mode
+    options:
+      - "Off"
+      - "Solar"
+      - "Fast"
+      - "Manual"
+  alfen_price_fallback:
+    name: Alfen price fallback
+    options:
+      - "Off"
+      - "Solar"
+    initial: "Solar"
+
+template:
+  - sensor:
+      # Normalized Mode 3 state: strips the null-padding from the raw
+      # 5-word Modbus string. USE THIS everywhere, not sensor.alfen_mode3_state.
+      - name: alfen_mode3
+        unique_id: alfen_mode3
+        state: >
+          {{ states('sensor.alfen_mode3_state').split('\x00')[0] | trim }}
+
+      # Human-readable Mode 3 (IEC 61851) label.
+      - name: alfen_mode3_text
+        unique_id: alfen_mode3_text
+        icon: mdi:ev-station
+        state: >
+          {% set s = states('sensor.alfen_mode3') %}
+          {% set m = {
+            'A':  'No vehicle connected',
+            'B':  'Vehicle connected',
+            'B1': 'Vehicle connected',
+            'B2': 'Vehicle connected, ready',
+            'C':  'Charging',
+            'C1': 'Connected, not charging',
+            'C2': 'Charging',
+            'D':  'Charging (ventilation)',
+            'D1': 'Charging (ventilation)',
+            'D2': 'Charging (ventilation)',
+            'E':  'Error / no supply',
+            'F':  'Charge point unavailable'
+          } %}
+          {{ m.get(s, s ~ ' (unmapped)') }}
+
+      # Solar surplus with an export margin baked in. The loop targets grid at
+      # -export_margin (i.e. still exporting), so it charges only from genuine
+      # surplus and backs off before importing. export_margin = 0 -> grid-zero.
+      - name: alfen_solar_surplus
+        unique_id: alfen_solar_surplus
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {{ (states('sensor.alfen_power_sum') | float(0))
+             - (states('sensor.p1_meter_power') | float(0))
+             - (states('input_number.alfen_export_margin') | float(300)) }}
+
+      - name: alfen_headroom_l1
+        unique_id: alfen_headroom_l1
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        state: >
+          {% set v = 230 %}
+          {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
+          {% set car = states('sensor.alfen_current_l1') | float(0) %}
+          {% set house = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car %}
+          {{ (fuse - house) | round(1) }}
+      - name: alfen_headroom_l2
+        unique_id: alfen_headroom_l2
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        state: >
+          {% set v = 230 %}
+          {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
+          {% set car = states('sensor.alfen_current_l2') | float(0) %}
+          {% set house = (states('sensor.p1_meter_power_phase_2') | float(0)) / v - car %}
+          {{ (fuse - house) | round(1) }}
+      - name: alfen_headroom_l3
+        unique_id: alfen_headroom_l3
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        state: >
+          {% set v = 230 %}
+          {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
+          {% set car = states('sensor.alfen_current_l3') | float(0) %}
+          {% set house = (states('sensor.p1_meter_power_phase_3') | float(0)) / v - car %}
+          {{ (fuse - house) | round(1) }}
+
+      - name: alfen_headroom_active
+        unique_id: alfen_headroom_active
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        state: >
+          {% set l1 = states('sensor.alfen_headroom_l1') | float(99) %}
+          {% set l2 = states('sensor.alfen_headroom_l2') | float(99) %}
+          {% set l3 = states('sensor.alfen_headroom_l3') | float(99) %}
+          {% set ph = states('sensor.alfen_phases') | int(1) %}
+          {% if ph == 3 %}
+          {{ [ l1, l2, l3 ] | min | round(1) }}
+          {% else %}
+          {{ l1 | round(1) }}
+          {% endif %}
+
+script:
+  alfen_set_current:
+    fields:
+      amps:
+        description: Target current in Amps
+    sequence:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.alfen_target_current
+        data:
+          value: "{{ amps | float(0) }}"
+      - variables:
+          words: >
+            {% set v = amps | float(0) %}
+            {% if v <= 0 %}
+            {{ [0, 0] }}
+            {% else %}
+            {% set ns = namespace(v=v, e=0) %}
+            {% for _ in range(64) %}
+            {% if ns.v >= 2 %}{% set ns.v = ns.v / 2 %}{% set ns.e = ns.e + 1 %}
+            {% elif ns.v < 1 %}{% set ns.v = ns.v * 2 %}{% set ns.e = ns.e - 1 %}
+            {% endif %}
+            {% endfor %}
+            {% set E = ns.e + 127 %}
+            {% set M = ((ns.v - 1) * 8388608) | round | int %}
+            {% set bits = E * 8388608 + M %}
+            {{ [ bits // 65536, bits % 65536 ] }}
+            {% endif %}
+      - service: modbus.write_register
+        data:
+          hub: alfen
+          slave: 1
+          address: 1210
+          value: "{{ words }}"
+
+  alfen_set_phases:
+    fields:
+      phases:
+        description: 1 or 3
+    sequence:
+      - service: modbus.write_register
+        data:
+          hub: alfen
+          slave: 1
+          address: 1215
+          value: "{{ phases | int }}"
+
+  alfen_switch_phases:
+    fields:
+      phases:
+        description: 1 or 3
+    mode: single
+    sequence:
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+      - delay: "00:00:10"
+      - service: script.alfen_set_phases
+        data:
+          phases: "{{ phases }}"
+      - delay: "00:00:05"
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+      # Stamp the switch time for the cooldown guard.
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.alfen_last_phase_switch
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+automation:
+  # --- Startup: re-assert the RESTORED mode after HA / the modbus
+  #     connection comes up. Always drops off the safe-current fallback first. ---
+  - id: alfen_startup_resume
+    alias: Alfen startup resume
+    mode: restart
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id: sensor.alfen_mode3
+        from:
+          - "unknown"
+          - "unavailable"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3') not in ['unknown','unavailable'] }}
+    actions:
+      - variables:
+          restored_mode: "{{ states('input_select.alfen_charge_mode') }}"
+          restored_target: "{{ states('input_number.alfen_target_current') | float(0) }}"
+      - delay: "00:00:03"
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.alfen_protect_lockout
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Fast' }}"
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ states('sensor.alfen_phases') | int(1) != 3 }}"
+                then:
+                  - service: script.alfen_switch_phases
+                    data:
+                      phases: 3
+              - service: script.alfen_set_current
+                data:
+                  amps: >
+                    {{ [ states('input_number.alfen_max_current') | float(20),
+                         states('input_number.alfen_phase_limit') | float(16),
+                         states('sensor.alfen_headroom_active') | float(99) ] | min }}
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Manual' }}"
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ restored_target }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Solar' }}"
+              - condition: template
+                value_template: >
+                  {{ states('sensor.alfen_mode3')
+                     not in ['A','E','F','unknown','unavailable',''] }}
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+        default: []
+
+  # --- Always-on fuse protection: pause + latch lockout if ANY phase
+  #     reaches the fuse rating, in ANY mode. Kept SEPARATE (5s cadence,
+  #     mode: restart) so it always fires promptly as the safety layer. ---
+  - id: alfen_fuse_guard
+    alias: Alfen fuse guard
+    mode: restart
+    trace:
+      stored_traces: 50
+    triggers:
+      - trigger: time_pattern
+        seconds: "/5"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
+      - condition: template
+        value_template: >
+          {{ states('sensor.p1_meter_power_phase_1') not in ['unknown','unavailable']
+             and states('sensor.p1_meter_power_phase_2') not in ['unknown','unavailable']
+             and states('sensor.p1_meter_power_phase_3') not in ['unknown','unavailable'] }}
+      - condition: template
+        value_template: >
+          {% set v = 230 %}
+          {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
+          {% set l1 = (states('sensor.p1_meter_power_phase_1') | float(0)) / v %}
+          {% set l2 = (states('sensor.p1_meter_power_phase_2') | float(0)) / v %}
+          {% set l3 = (states('sensor.p1_meter_power_phase_3') | float(0)) / v %}
+          {% set over = [l1, l2, l3] | max >= fuse %}
+          {% set charging = states('input_number.alfen_target_current') | float(0)
+                            >= states('input_number.alfen_min_current') | float(6) %}
+          {{ over and charging }}
+    actions:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.alfen_protect_lockout
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+
+  # --- Protection lockout clear: only after headroom has been comfortably
+  #     clear (min + recovery_margin) for 2 min, then kick-start Solar. ---
+  - id: alfen_protect_clear
+    alias: Alfen protection lockout clear
+    mode: restart
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.alfen_headroom_active') | float(0)
+             >= states('input_number.alfen_min_current') | float(6)
+              + states('input_number.alfen_recovery_margin') | float(3) }}
+        for: "00:02:00"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.alfen_protect_lockout
+        state: "on"
+    actions:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.alfen_protect_lockout
+      - condition: state
+        entity_id: input_select.alfen_charge_mode
+        state: "Solar"
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
+      - condition: template
+        value_template: >
+          {{ states('input_number.alfen_target_current') | float(0)
+             < states('input_number.alfen_min_current') | float(6) }}
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+
+  # --- Single control loop: all behaviour dispatched by trigger id.
+  #     Also carries the 30s keep-alive (renew). ---
   - id: alfen_control
     alias: Alfen control
     mode: queued
