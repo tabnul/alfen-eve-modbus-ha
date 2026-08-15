@@ -54,8 +54,11 @@ views:
         title: Status
         cards:
           - type: tile
-            entity: sensor.alfen_mode3_state
-            name: Mode 3 state
+            entity: sensor.alfen_mode3_text
+            name: EV status
+          - type: tile
+            entity: sensor.alfen_mode3
+            name: Mode 3 (raw)
           - type: tile
             entity: sensor.alfen_phases
             name: Phases

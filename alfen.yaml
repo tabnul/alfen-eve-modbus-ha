@@ -79,6 +79,35 @@ input_select:
 
 template:
   - sensor:
+      # Normalized Mode 3 state: strips the null-padding from the raw
+      # 5-word Modbus string. USE THIS everywhere, not sensor.alfen_mode3_state.
+      - name: alfen_mode3
+        unique_id: alfen_mode3
+        state: >
+          {{ states('sensor.alfen_mode3_state').split('\x00')[0] | trim }}
+
+      # Human-readable Mode 3 (IEC 61851) label.
+      - name: alfen_mode3_text
+        unique_id: alfen_mode3_text
+        icon: mdi:ev-station
+        state: >
+          {% set s = states('sensor.alfen_mode3') %}
+          {% set m = {
+            'A':  'No vehicle connected',
+            'B':  'Vehicle connected',
+            'B1': 'Vehicle connected',
+            'B2': 'Vehicle connected, ready',
+            'C':  'Charging',
+            'C1': 'Connected, not charging',
+            'C2': 'Charging',
+            'D':  'Charging (ventilation)',
+            'D1': 'Charging (ventilation)',
+            'D2': 'Charging (ventilation)',
+            'E':  'Error / no supply',
+            'F':  'Charge point unavailable'
+          } %}
+          {{ m.get(s, s ~ ' (unmapped)') }}
+
       - name: alfen_solar_surplus
         unique_id: alfen_solar_surplus
         unit_of_measurement: W
@@ -137,28 +166,6 @@ template:
           {% else %}
           {{ l1 | round(1) }}
           {% endif %}
-
-      # Human-readable Mode 3 (IEC 61851) state.
-      - name: alfen_mode3_text
-        unique_id: alfen_mode3_text
-        icon: mdi:ev-station
-        state: >
-          {% set s = states('sensor.alfen_mode3_state') %}
-          {% set m = {
-            'A':  'No vehicle connected',
-            'B':  'Vehicle connected',
-            'B1': 'Vehicle connected',
-            'B2': 'Vehicle connected, ready',
-            'C':  'Charging',
-            'C1': 'Connected, not charging',
-            'C2': 'Charging',
-            'D':  'Charging (ventilation)',
-            'D1': 'Charging (ventilation)',
-            'D2': 'Charging (ventilation)',
-            'E':  'Error / no supply',
-            'F':  'Charge point unavailable'
-          } %}
-          {{ m.get(s, s) }}
 
 script:
   alfen_set_current:
@@ -236,8 +243,8 @@ automation:
     conditions:
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
-             not in ['A','E','F','unknown','unavailable'] }}
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
     actions:
       - service: script.alfen_set_current
         data:
@@ -256,8 +263,8 @@ automation:
     conditions:
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
-             not in ['A','E','F','unknown','unavailable'] }}
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
       - condition: template
         value_template: >
           {{ states('sensor.p1_meter_power_phase_1') not in ['unknown','unavailable']
@@ -307,8 +314,8 @@ automation:
         state: "Solar"
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
-             not in ['A','E','F','unknown','unavailable'] }}
+          {{ states('sensor.alfen_mode3')
+             not in ['A','E','F','unknown','unavailable',''] }}
       - condition: template
         value_template: >
           {{ states('input_number.alfen_target_current') | float(0)
@@ -332,7 +339,7 @@ automation:
         entity_id: input_select.alfen_charge_mode
         id: mode_change
       - trigger: state
-        entity_id: sensor.alfen_mode3_state
+        entity_id: sensor.alfen_mode3
         id: mode_change
       - trigger: state
         entity_id: input_number.alfen_target_current
@@ -373,8 +380,8 @@ automation:
                       - condition: template
                         value_template: >
                           {{ is_state('input_select.alfen_charge_mode','Off')
-                             or states('sensor.alfen_mode3_state')
-                                in ['A','E','F','unknown','unavailable'] }}
+                             or states('sensor.alfen_mode3')
+                                in ['A','E','F','unknown','unavailable',''] }}
                     sequence:
                       - service: input_boolean.turn_off
                         target:
@@ -426,8 +433,8 @@ automation:
                 state: "off"
               - condition: template
                 value_template: >
-                  {{ states('sensor.alfen_mode3_state')
-                     not in ['A','E','F','unknown','unavailable'] }}
+                  {{ states('sensor.alfen_mode3')
+                     not in ['A','E','F','unknown','unavailable',''] }}
               - condition: template
                 value_template: >
                   {{ states('input_number.alfen_target_current') | float(0)
@@ -462,8 +469,8 @@ automation:
                 state: "Solar"
               - condition: template
                 value_template: >
-                  {{ states('sensor.alfen_mode3_state')
-                     not in ['A','E','F','unknown','unavailable'] }}
+                  {{ states('sensor.alfen_mode3')
+                     not in ['A','E','F','unknown','unavailable',''] }}
               - condition: template
                 value_template: >
                   {{ states('input_number.alfen_target_current') | float(0)
