@@ -63,7 +63,7 @@ input_number:
     unit_of_measurement: A
   alfen_export_margin:      # W of export to keep in reserve; 0 = grid-zero, higher = stricter solar-only
     name: Alfen export margin
-    initial: 100
+    initial: 300
     min: 0
     max: 1000
     step: 50
@@ -429,13 +429,13 @@ automation:
         value_template: >
           {{ states('sensor.alfen_solar_surplus') | float(0)
              >= states('input_number.alfen_min_current') | float(6) * 230 }}
-        for: "00:01:00"
+        for: "00:03:00"
         id: solar_start
       - trigger: template
         value_template: >
           {{ states('sensor.alfen_solar_surplus') | float(0)
              < states('input_number.alfen_min_current') | float(6) * 230 }}
-        for: "00:02:00"
+        for: "00:03:00"
         id: solar_stop
       - trigger: template
         value_template: >
