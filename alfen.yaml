@@ -67,7 +67,7 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
-  alfen_export_margin:      # W of export to keep in reserve; 0 = grid-zero, higher = stricter solar-only
+  alfen_export_margin:
     name: Alfen export margin
     initial: 300
     min: 0
@@ -75,7 +75,7 @@ input_number:
     step: 50
     mode: box
     unit_of_measurement: W
-  alfen_phase_cooldown:     # minutes to block further phase switches after one
+  alfen_phase_cooldown:
     name: Alfen phase cooldown
     initial: 10
     min: 0
@@ -85,7 +85,6 @@ input_number:
     unit_of_measurement: min
 
 input_select:
-  # No initial: -> restores last selected mode across restart.
   alfen_charge_mode:
     name: Alfen charge mode
     options:
@@ -102,14 +101,11 @@ input_select:
 
 template:
   - sensor:
-      # Normalized Mode 3 state: strips the null-padding from the raw
-      # 5-word Modbus string. USE THIS everywhere, not sensor.alfen_mode3_state.
       - name: alfen_mode3
         unique_id: alfen_mode3
         state: >
           {{ states('sensor.alfen_mode3_state').split('\x00')[0] | trim }}
 
-      # Human-readable Mode 3 (IEC 61851) label.
       - name: alfen_mode3_text
         unique_id: alfen_mode3_text
         icon: mdi:ev-station
@@ -131,14 +127,14 @@ template:
           } %}
           {{ m.get(s, s ~ ' (unmapped)') }}
 
-      # Solar surplus with an export margin baked in. The loop targets grid at
-      # -export_margin (i.e. still exporting), so it charges only from genuine
-      # surplus and backs off before importing. export_margin = 0 -> grid-zero.
       - name: alfen_solar_surplus
         unique_id: alfen_solar_surplus
         unit_of_measurement: W
         device_class: power
         state_class: measurement
+        availability: >
+          {{ states('sensor.alfen_power_sum') not in ['unknown','unavailable']
+             and states('sensor.p1_meter_power') not in ['unknown','unavailable'] }}
         state: >
           {{ (states('sensor.alfen_power_sum') | float(0))
              - (states('sensor.p1_meter_power') | float(0))
@@ -258,7 +254,6 @@ script:
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
-      # Stamp the switch time for the cooldown guard.
       - service: input_datetime.set_datetime
         target:
           entity_id: input_datetime.alfen_last_phase_switch
@@ -266,8 +261,6 @@ script:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
 automation:
-  # --- Startup: re-assert the RESTORED mode after HA / the modbus
-  #     connection comes up. Always drops off the safe-current fallback first. ---
   - id: alfen_startup_resume
     alias: Alfen startup resume
     mode: restart
@@ -326,15 +319,16 @@ automation:
                 value_template: >
                   {{ states('sensor.alfen_mode3')
                      not in ['A','E','F','unknown','unavailable',''] }}
+              - condition: template
+                value_template: >
+                  {{ states('sensor.alfen_solar_surplus') | float(0)
+                     >= states('input_number.alfen_min_current') | float(6) * 230 }}
             sequence:
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
         default: []
 
-  # --- Keep-alive: refresh 1210 every 30s while a car is connected.
-  #     STANDALONE (mode: restart) so the control queue can never delay it —
-  #     this is what keeps the charger off its safe-current fallback. ---
   - id: alfen_setpoint_renew
     alias: Alfen setpoint auto-renew
     mode: restart
@@ -351,8 +345,6 @@ automation:
         data:
           amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
 
-  # --- Always-on fuse protection: pause + latch lockout if ANY phase
-  #     reaches the fuse rating, in ANY mode. ---
   - id: alfen_fuse_guard
     alias: Alfen fuse guard
     mode: restart
@@ -390,8 +382,6 @@ automation:
         data:
           amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
-  # --- Protection lockout clear: only after headroom has been comfortably
-  #     clear (min + recovery_margin) for 2 min, then kick-start Solar. ---
   - id: alfen_protect_clear
     alias: Alfen protection lockout clear
     mode: restart
@@ -421,11 +411,14 @@ automation:
         value_template: >
           {{ states('input_number.alfen_target_current') | float(0)
              < states('input_number.alfen_min_current') | float(6) }}
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_solar_surplus') | float(0)
+             >= states('input_number.alfen_min_current') | float(6) * 230 }}
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
 
-  # --- Single control loop: all behaviour dispatched by trigger id. ---
   - id: alfen_control
     alias: Alfen control
     mode: queued
@@ -471,7 +464,6 @@ automation:
         id: phase_down
     actions:
       - choose:
-          # ===== Mode / car-state change: Off|disconnect -> pause (+clear lockout); Fast -> 3p max =====
           - conditions:
               - condition: trigger
                 id: mode_change
@@ -510,7 +502,6 @@ automation:
                                  states('sensor.alfen_headroom_active') | float(99) ] | min }}
                 default: []
 
-          # ===== Manual slider write-through =====
           - conditions:
               - condition: trigger
                 id: manual_slider
@@ -522,7 +513,6 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
 
-          # ===== Solar start (kickstart to min; blocked while locked out) =====
           - conditions:
               - condition: trigger
                 id: solar_start
@@ -545,7 +535,6 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
 
-          # ===== Solar stop =====
           - conditions:
               - condition: trigger
                 id: solar_stop
@@ -561,7 +550,6 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
-          # ===== Solar modulate (20s tick, surplus feedback + fuse cutout) =====
           - conditions:
               - condition: trigger
                 id: tick
@@ -580,6 +568,7 @@ automation:
               - variables:
                   minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
                   head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
+                  surplus: "{{ states('sensor.alfen_solar_surplus') | float(0) }}"
                   newt: >
                     {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
                     {% set ph = states('sensor.alfen_phases') | int(1) %}
@@ -593,7 +582,9 @@ automation:
                     {% set capped = [ raw, maxc, plim, head ] | min %}
                     {{ ([ capped, minc ] | max) | round(0) }}
               - choose:
-                  # Headroom below the charge floor -> latch lockout + stop.
+                  # Headroom below floor -> fuse-style stop + lockout.
+                  # (Stopping on lack of surplus is handled by the 3-min
+                  #  solar_stop trigger, symmetric with the 3-min start.)
                   - conditions:
                       - condition: template
                         value_template: "{{ head | float < minc | float }}"
@@ -613,7 +604,6 @@ automation:
                     data:
                       amps: "{{ newt }}"
 
-          # ===== Phase up 1 -> 3 (gated by cooldown) =====
           - conditions:
               - condition: trigger
                 id: phase_up
@@ -637,7 +627,6 @@ automation:
                 data:
                   phases: 3
 
-          # ===== Phase down 3 -> 1 (gated by cooldown; only if L1 can hold 1-phase) =====
           - conditions:
               - condition: trigger
                 id: phase_down
