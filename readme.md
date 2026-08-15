@@ -1,3 +1,6 @@
+### Note: Solar charging broken atm.
+
+
 # Alfen Eve — native Modbus EV charging control for Home Assistant
 
 Solar-surplus, dynamic-price and manual control of an **Alfen Eve Pro-line (NG9xx)** EV

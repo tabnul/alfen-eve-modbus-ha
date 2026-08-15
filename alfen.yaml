@@ -542,9 +542,22 @@ automation:
                   {{ states('input_number.alfen_target_current') | float(0)
                      < states('input_number.alfen_min_current') | float(6) }}
             sequence:
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+              # If surplus can't sustain 3-phase minimum but we're on 3-phase,
+              # drop to 1-phase first (switch resumes at min). Else start at min.
+              - if:
+                  - condition: template
+                    value_template: >
+                      {{ states('sensor.alfen_phases') | int(1) == 3
+                         and states('sensor.alfen_solar_surplus') | float(0)
+                             < 3 * states('input_number.alfen_min_current') | float(6) * 230 }}
+                then:
+                  - service: script.alfen_switch_phases
+                    data:
+                      phases: 1
+                else:
+                  - service: script.alfen_set_current
+                    data:
+                      amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
 
           - conditions:
               - condition: trigger
@@ -561,6 +574,48 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
+          # ===== Solar tick-start: begin charging when stopped but surplus is
+          #        sustained-high. Level-triggered, so it works even when the
+          #        edge-triggered solar_start was missed. Phase-aware: starts on
+          #        1-phase when surplus can't sustain 3-phase minimum. =====
+          - conditions:
+              - condition: trigger
+                id: tick
+              - condition: state
+                entity_id: input_select.alfen_charge_mode
+                state: "Solar"
+              - condition: state
+                entity_id: input_boolean.alfen_protect_lockout
+                state: "off"
+              - condition: template
+                value_template: >
+                  {{ states('sensor.alfen_mode3')
+                     not in ['A','E','F','unknown','unavailable',''] }}
+              - condition: template
+                value_template: >
+                  {{ states('input_number.alfen_target_current') | float(0)
+                     < states('input_number.alfen_min_current') | float(6) }}
+              - condition: template
+                value_template: >
+                  {{ states('sensor.alfen_solar_surplus') | float(0)
+                     >= states('input_number.alfen_min_current') | float(6) * 230 }}
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: >
+                      {{ states('sensor.alfen_phases') | int(1) == 3
+                         and states('sensor.alfen_solar_surplus') | float(0)
+                             < 3 * states('input_number.alfen_min_current') | float(6) * 230 }}
+                then:
+                  - service: script.alfen_switch_phases
+                    data:
+                      phases: 1
+                else:
+                  - service: script.alfen_set_current
+                    data:
+                      amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+
+          # ===== Solar modulate (20s tick): feedback toward the surplus target. =====
           - conditions:
               - condition: trigger
                 id: tick
