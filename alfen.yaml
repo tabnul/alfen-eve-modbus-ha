@@ -485,6 +485,17 @@ automation:
                   - conditions:
                       - condition: state
                         entity_id: input_select.alfen_charge_mode
+                        state: "Solar"
+                    sequence:
+                      - service: input_boolean.turn_off
+                        target:
+                          entity_id: input_boolean.alfen_protect_lockout
+                      - service: script.alfen_set_current
+                        data:
+                          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+                  - conditions:
+                      - condition: state
+                        entity_id: input_select.alfen_charge_mode
                         state: "Fast"
                     sequence:
                       - if:
