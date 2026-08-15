@@ -21,6 +21,8 @@ views:
                 name: Phase limit (car)
               - entity: input_number.alfen_fuse_per_phase
                 name: Fuse per phase (protection)
+              - entity: input_number.alfen_export_margin
+                name: Export margin (solar-only reserve)
               - entity: input_number.alfen_recovery_margin
                 name: Recovery margin
               - entity: input_number.alfen_min_current

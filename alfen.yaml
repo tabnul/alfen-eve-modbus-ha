@@ -61,6 +61,14 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
+  alfen_export_margin:      # W of export to keep in reserve; 0 = grid-zero, higher = stricter solar-only
+    name: Alfen export margin
+    initial: 100
+    min: 0
+    max: 1000
+    step: 50
+    mode: box
+    unit_of_measurement: W
 
 input_select:
   # No initial: -> restores last selected mode across restart.
@@ -109,6 +117,9 @@ template:
           } %}
           {{ m.get(s, s ~ ' (unmapped)') }}
 
+      # Solar surplus with an export margin baked in. The loop targets grid at
+      # -export_margin (i.e. still exporting), so it charges only from genuine
+      # surplus and backs off before importing. export_margin = 0 -> grid-zero.
       - name: alfen_solar_surplus
         unique_id: alfen_solar_surplus
         unit_of_measurement: W
@@ -116,7 +127,8 @@ template:
         state_class: measurement
         state: >
           {{ (states('sensor.alfen_power_sum') | float(0))
-             - (states('sensor.p1_meter_power') | float(0)) }}
+             - (states('sensor.p1_meter_power') | float(0))
+             - (states('input_number.alfen_export_margin') | float(100)) }}
 
       - name: alfen_headroom_l1
         unique_id: alfen_headroom_l1
@@ -258,7 +270,6 @@ automation:
           restored_mode: "{{ states('input_select.alfen_charge_mode') }}"
           restored_target: "{{ states('input_number.alfen_target_current') | float(0) }}"
       - delay: "00:00:03"
-      # Drop off the safe-current fallback first, whatever the mode.
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -298,7 +309,6 @@ automation:
                   {{ states('sensor.alfen_mode3')
                      not in ['A','E','F','unknown','unavailable',''] }}
             sequence:
-              # Kick Solar to min; the modulate loop ramps from here.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
@@ -531,7 +541,7 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
-          # ===== Solar modulate (15s tick, grid-zero feedback + fuse cutout) =====
+          # ===== Solar modulate (15s tick, surplus feedback + fuse cutout) =====
           - conditions:
               - condition: trigger
                 id: tick
