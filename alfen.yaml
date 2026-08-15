@@ -5,6 +5,7 @@ input_boolean:
     name: Alfen protection lockout
 
 input_number:
+  # No initial: -> restores last value across restart.
   alfen_target_current:
     name: Alfen target current
     min: 0
@@ -62,6 +63,7 @@ input_number:
     unit_of_measurement: A
 
 input_select:
+  # No initial: -> restores last selected mode across restart.
   alfen_charge_mode:
     name: Alfen charge mode
     options:
@@ -69,7 +71,6 @@ input_select:
       - "Solar"
       - "Fast"
       - "Manual"
-    initial: "Off"
   alfen_price_fallback:
     name: Alfen price fallback
     options:
@@ -233,6 +234,76 @@ script:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
 
 automation:
+  # --- Startup: re-assert the RESTORED mode after HA / the modbus
+  #     connection comes up. Mode + target survive the restart (no initial:),
+  #     so this just re-pushes that state to the charger. Always drops off
+  #     the safe-current fallback first. ---
+  - id: alfen_startup_resume
+    alias: Alfen startup resume
+    mode: restart
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id: sensor.alfen_mode3
+        from:
+          - "unknown"
+          - "unavailable"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3') not in ['unknown','unavailable'] }}
+    actions:
+      - variables:
+          restored_mode: "{{ states('input_select.alfen_charge_mode') }}"
+          restored_target: "{{ states('input_number.alfen_target_current') | float(0) }}"
+      - delay: "00:00:03"
+      # Drop off the safe-current fallback first, whatever the mode.
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.alfen_protect_lockout
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Fast' }}"
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ states('sensor.alfen_phases') | int(1) != 3 }}"
+                then:
+                  - service: script.alfen_switch_phases
+                    data:
+                      phases: 3
+              - service: script.alfen_set_current
+                data:
+                  amps: >
+                    {{ [ states('input_number.alfen_max_current') | float(20),
+                         states('input_number.alfen_phase_limit') | float(16),
+                         states('sensor.alfen_headroom_active') | float(99) ] | min }}
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Manual' }}"
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ restored_target }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ restored_mode == 'Solar' }}"
+              - condition: template
+                value_template: >
+                  {{ states('sensor.alfen_mode3')
+                     not in ['A','E','F','unknown','unavailable',''] }}
+            sequence:
+              # Kick Solar to min; the modulate loop ramps from here.
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+        default: []
+
   # --- Keep-alive: refresh 1210 every 30s while a car is connected ---
   - id: alfen_setpoint_renew
     alias: Alfen setpoint auto-renew
