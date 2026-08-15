@@ -4,6 +4,12 @@ input_boolean:
   alfen_protect_lockout:
     name: Alfen protection lockout
 
+input_datetime:
+  alfen_last_phase_switch:
+    name: Alfen last phase switch
+    has_date: true
+    has_time: true
+
 input_number:
   # No initial: -> restores last value across restart.
   alfen_target_current:
@@ -69,6 +75,14 @@ input_number:
     step: 50
     mode: box
     unit_of_measurement: W
+  alfen_phase_cooldown:     # minutes to block further phase switches after one
+    name: Alfen phase cooldown
+    initial: 10
+    min: 0
+    max: 60
+    step: 1
+    mode: box
+    unit_of_measurement: min
 
 input_select:
   # No initial: -> restores last selected mode across restart.
@@ -128,7 +142,7 @@ template:
         state: >
           {{ (states('sensor.alfen_power_sum') | float(0))
              - (states('sensor.p1_meter_power') | float(0))
-             - (states('input_number.alfen_export_margin') | float(100)) }}
+             - (states('input_number.alfen_export_margin') | float(300)) }}
 
       - name: alfen_headroom_l1
         unique_id: alfen_headroom_l1
@@ -244,12 +258,16 @@ script:
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+      # Stamp the switch time for the cooldown guard.
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.alfen_last_phase_switch
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
 automation:
   # --- Startup: re-assert the RESTORED mode after HA / the modbus
-  #     connection comes up. Mode + target survive the restart (no initial:),
-  #     so this just re-pushes that state to the charger. Always drops off
-  #     the safe-current fallback first. ---
+  #     connection comes up. Always drops off the safe-current fallback first. ---
   - id: alfen_startup_resume
     alias: Alfen startup resume
     mode: restart
@@ -593,7 +611,7 @@ automation:
                     data:
                       amps: "{{ newt }}"
 
-          # ===== Phase up 1 -> 3 =====
+          # ===== Phase up 1 -> 3 (gated by cooldown) =====
           - conditions:
               - condition: trigger
                 id: phase_up
@@ -606,12 +624,18 @@ automation:
                 value_template: >
                   {{ states('input_number.alfen_target_current') | float(0)
                      >= states('input_number.alfen_min_current') | float(6) }}
+              - condition: template
+                value_template: >
+                  {% set last = states('input_datetime.alfen_last_phase_switch') %}
+                  {% set cd = states('input_number.alfen_phase_cooldown') | float(10) * 60 %}
+                  {{ true if last in ['unknown','unavailable']
+                     else (now() - as_datetime(last)).total_seconds() > cd }}
             sequence:
               - service: script.alfen_switch_phases
                 data:
                   phases: 3
 
-          # ===== Phase down 3 -> 1 (only if L1 can hold a 1-phase charge) =====
+          # ===== Phase down 3 -> 1 (gated by cooldown; only if L1 can hold 1-phase) =====
           - conditions:
               - condition: trigger
                 id: phase_down
@@ -630,6 +654,12 @@ automation:
                   {% set car_l1_now = (amps / 3) if ph == 3 else amps %}
                   {% set house_l1 = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car_l1_now %}
                   {{ (house_l1 + minc) <= fuse }}
+              - condition: template
+                value_template: >
+                  {% set last = states('input_datetime.alfen_last_phase_switch') %}
+                  {% set cd = states('input_number.alfen_phase_cooldown') | float(10) * 60 %}
+                  {{ true if last in ['unknown','unavailable']
+                     else (now() - as_datetime(last)).total_seconds() > cd }}
             sequence:
               - service: script.alfen_switch_phases
                 data:
