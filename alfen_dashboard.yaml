@@ -119,6 +119,19 @@ views:
           - type: tile
             entity: sensor.p1_meter_power_phase_3
             name: Grid L3
+          - type: entities
+            title: Fuse headroom (A the car may still draw)
+            entities:
+              - entity: sensor.alfen_headroom_active
+                name: Active headroom (governs charging)
+              - entity: sensor.alfen_headroom_l1
+                name: Headroom L1
+              - entity: sensor.alfen_headroom_l2
+                name: Headroom L2
+              - entity: sensor.alfen_headroom_l3
+                name: Headroom L3
+              - entity: input_number.alfen_fuse_per_phase
+                name: Fuse per phase (total cap)
           - type: custom:apexcharts-card
             grid_options:
               columns: full
