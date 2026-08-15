@@ -1,17 +1,9 @@
 # packages/alfen.yaml — generic control engine. No site-specific price wiring.
-
-input_boolean:
-  alfen_protect_lockout:
-    name: Alfen protection lockout
-
-input_datetime:
-  alfen_last_phase_switch:
-    name: Alfen last phase switch
-    has_date: true
-    has_time: true
+# REDESIGN: minimal-write Solar (anti-flap). Always start 1-phase; switch up only
+# on sustained 3-phase surplus. No entry force-stop, no tick-start, no availability
+# guard. Fast / Manual / Off / keep-alive / fuse guard unchanged from the working base.
 
 input_number:
-  # No initial: -> restores last value across restart.
   alfen_target_current:
     name: Alfen target current
     min: 0
@@ -21,7 +13,6 @@ input_number:
     unit_of_measurement: A
   alfen_min_current:
     name: Alfen min current
-    initial: 6
     min: 6
     max: 16
     step: 1
@@ -29,7 +20,6 @@ input_number:
     unit_of_measurement: A
   alfen_max_current:
     name: Alfen max current
-    initial: 20
     min: 6
     max: 32
     step: 1
@@ -37,52 +27,59 @@ input_number:
     unit_of_measurement: A
   alfen_stop_current:
     name: Alfen stop current
-    initial: 5
     min: 0
     max: 6
     step: 1
     mode: box
     unit_of_measurement: A
-  alfen_phase_limit:
-    name: Alfen phase limit
-    initial: 16
-    min: 6
-    max: 32
-    step: 1
-    mode: box
-    unit_of_measurement: A
   alfen_fuse_per_phase:
     name: Alfen fuse per phase
-    initial: 25
     min: 6
     max: 80
     step: 1
     mode: box
     unit_of_measurement: A
-  alfen_recovery_margin:
-    name: Alfen recovery margin
-    initial: 3
-    min: 0
-    max: 10
-    step: 1
+  alfen_phase_up_threshold:
+    name: Alfen phase up threshold
+    min: 4140
+    max: 11000
+    step: 100
     mode: box
-    unit_of_measurement: A
-  alfen_export_margin:
-    name: Alfen export margin
-    initial: 300
-    min: 0
-    max: 1000
-    step: 50
+    unit_of_measurement: W
+  alfen_phase_down_threshold:
+    name: Alfen phase down threshold
+    min: 2000
+    max: 6000
+    step: 100
     mode: box
     unit_of_measurement: W
   alfen_phase_cooldown:
     name: Alfen phase cooldown
-    initial: 10
     min: 0
     max: 60
     step: 1
     mode: box
     unit_of_measurement: min
+  alfen_solar_hold:
+    name: Alfen solar start/stop hold
+    min: 0
+    max: 15
+    step: 1
+    mode: box
+    unit_of_measurement: min
+  alfen_phase_hold:
+    name: Alfen phase switch hold
+    min: 0
+    max: 15
+    step: 1
+    mode: box
+    unit_of_measurement: min
+
+input_datetime:
+  alfen_last_phase_switch:
+    name: Alfen last phase switch
+    has_date: true
+    has_time: true
 
 input_select:
   alfen_charge_mode:
@@ -91,7 +88,6 @@ input_select:
       - "Off"
       - "Solar"
       - "Fast"
-      - "Manual"
   alfen_price_fallback:
     name: Alfen price fallback
     options:
@@ -100,17 +96,33 @@ input_select:
     initial: "Solar"
 
 template:
-  - sensor:
-      - name: alfen_mode3
-        unique_id: alfen_mode3
+  - binary_sensor:
+      # Surplus threshold flags. last_changed lets the control loop measure how long
+      # a condition has held (level-triggered, no missed edges).
+      - name: alfen_surplus_over_start
+        unique_id: alfen_surplus_over_start
         state: >
-          {{ states('sensor.alfen_mode3_state').split('\x00')[0] | trim }}
+          {{ states('sensor.alfen_solar_surplus') | float(0)
+             >= states('input_number.alfen_min_current') | float(6) * 230 }}
+      - name: alfen_surplus_over_up
+        unique_id: alfen_surplus_over_up
+        state: >
+          {{ states('sensor.alfen_solar_surplus') | float(0)
+             >= states('input_number.alfen_phase_up_threshold') | float(4800) }}
+      - name: alfen_surplus_under_down
+        unique_id: alfen_surplus_under_down
+        state: >
+          {{ states('sensor.alfen_solar_surplus') | float(0)
+             < states('input_number.alfen_phase_down_threshold') | float(4140) }}
 
+  - sensor:
+      # Human-readable Mode 3 (IEC 61851) label for the dashboard. Display only —
+      # the automations read raw sensor.alfen_mode3_state directly.
       - name: alfen_mode3_text
         unique_id: alfen_mode3_text
         icon: mdi:ev-station
         state: >
-          {% set s = states('sensor.alfen_mode3') %}
+          {% set s = states('sensor.alfen_mode3_state').split('\x00')[0] | trim %}
           {% set m = {
             'A':  'No vehicle connected',
             'B':  'Vehicle connected',
@@ -132,13 +144,9 @@ template:
         unit_of_measurement: W
         device_class: power
         state_class: measurement
-        availability: >
-          {{ states('sensor.alfen_power_sum') not in ['unknown','unavailable']
-             and states('sensor.p1_meter_power') not in ['unknown','unavailable'] }}
         state: >
           {{ (states('sensor.alfen_power_sum') | float(0))
-             - (states('sensor.p1_meter_power') | float(0))
-             - (states('input_number.alfen_export_margin') | float(300)) }}
+             - (states('sensor.p1_meter_power') | float(0)) }}
 
       - name: alfen_headroom_l1
         unique_id: alfen_headroom_l1
@@ -258,39 +266,107 @@ script:
         target:
           entity_id: input_datetime.alfen_last_phase_switch
         data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          timestamp: "{{ now().timestamp() }}"
 
 automation:
-  - id: alfen_startup_resume
-    alias: Alfen startup resume
+  # --- Keep-alive: refresh 1210 every 30s while a car is connected ---
+  - id: alfen_setpoint_renew
+    alias: Alfen setpoint auto-renew
     mode: restart
     triggers:
-      - trigger: homeassistant
-        event: start
-      - trigger: state
-        entity_id: sensor.alfen_mode3
-        from:
-          - "unknown"
-          - "unavailable"
+      - trigger: time_pattern
+        seconds: "/30"
     conditions:
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3') not in ['unknown','unavailable'] }}
+          {{ states('sensor.alfen_mode3_state')
+             not in ['A','E','F','unknown','unavailable'] }}
     actions:
-      - variables:
-          restored_mode: "{{ states('input_select.alfen_charge_mode') }}"
-          restored_target: "{{ states('input_number.alfen_target_current') | float(0) }}"
-      - delay: "00:00:03"
       - service: script.alfen_set_current
         data:
-          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-      - service: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.alfen_protect_lockout
+          amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
+
+  # --- Always-on fuse protection (separate, 5s cadence) ---
+  # --- Fuse guard (every 5s, all modes): keep every phase under the fuse by
+  #     ADJUSTING the charge current, not cutting it. In Fast it trims down when a
+  #     phase gets tight and recovers back up to max when it clears. In Solar the
+  #     modulate loop already clamps to headroom, so here the guard is protective
+  #     only (pause if even the 6 A floor won't fit). Deadband avoids churn. ---
+  - id: alfen_fuse_guard
+    alias: Alfen fuse guard
+    mode: restart
+    triggers:
+      - trigger: time_pattern
+        seconds: "/5"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3_state')
+             not in ['A','E','F','unknown','unavailable'] }}
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_headroom_active') not in ['unknown','unavailable'] }}
+    actions:
+      - variables:
+          minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
+          head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
+          cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
+      - choose:
+          # Headroom below the 6 A floor -> can't fit; pause (any mode).
+          - conditions:
+              - condition: template
+                value_template: "{{ head | float < minc | float }}"
+              - condition: template
+                value_template: "{{ cur | float >= minc | float }}"
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+          # Fast: hold current at the highest safe value up to max (auto down/up).
+          - conditions:
+              - condition: state
+                entity_id: input_select.alfen_charge_mode
+                state: "Fast"
+            sequence:
+              - variables:
+                  ceiling: "{{ states('input_number.alfen_max_current') | float(16) }}"
+                  newt: "{{ [ [ head | float, minc | float ] | max, ceiling | float ] | min | round(0) }}"
+              - condition: template
+                value_template: "{{ (newt | float - cur | float) | abs >= 1 }}"
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ newt }}"
+        # Solar (and anything else) with headroom >= min: leave it to the modulate
+        # loop, which already clamps to headroom and recovers. Nothing to do.
+        default: []
+
+  # --- Mode routing: Off / disconnect -> pause; Fast -> 3p max. ---
+  - id: alfen_charge_mode_apply
+    alias: Alfen charge mode apply
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: input_select.alfen_charge_mode
+      - trigger: state
+        entity_id: sensor.alfen_mode3_state
+      - trigger: homeassistant
+        event: start
+    actions:
       - choose:
           - conditions:
               - condition: template
-                value_template: "{{ restored_mode == 'Fast' }}"
+                value_template: >
+                  {{ is_state('input_select.alfen_charge_mode','Off')
+                     or states('sensor.alfen_mode3_state')
+                        in ['A','E','F','unknown','unavailable'] }}
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+          - conditions:
+              - condition: state
+                entity_id: input_select.alfen_charge_mode
+                state: "Fast"
             sequence:
               - if:
                   - condition: template
@@ -302,254 +378,85 @@ automation:
               - service: script.alfen_set_current
                 data:
                   amps: >
-                    {{ [ states('input_number.alfen_max_current') | float(20),
-                         states('input_number.alfen_phase_limit') | float(16),
+                    {{ [ states('input_number.alfen_max_current') | float(16),
                          states('sensor.alfen_headroom_active') | float(99) ] | min }}
-          - conditions:
-              - condition: template
-                value_template: "{{ restored_mode == 'Manual' }}"
-            sequence:
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ restored_target }}"
-          - conditions:
-              - condition: template
-                value_template: "{{ restored_mode == 'Solar' }}"
-              - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_mode3')
-                     not in ['A','E','F','unknown','unavailable',''] }}
-              - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_solar_surplus') | float(0)
-                     >= states('input_number.alfen_min_current') | float(6) * 230 }}
-            sequence:
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
         default: []
 
-  - id: alfen_setpoint_renew
-    alias: Alfen setpoint auto-renew
-    mode: restart
+  # --- Unified Solar control loop. Level-triggered on a /20s tick (+ mode change),
+  #     so it re-checks conditions every tick and never misses a threshold-crossing
+  #     edge. A choose runs at most ONE action per tick -> one write max -> no
+  #     write-contention/flapping. Duration ("held N min") is measured from each
+  #     surplus binary_sensor's last_changed. mode: single so a 15s phase switch
+  #     completes before the next tick. ---
+  - id: alfen_solar
+    alias: Alfen solar control
+    mode: single
     triggers:
       - trigger: time_pattern
-        seconds: "/30"
+        seconds: "/20"
+      - trigger: state
+        entity_id: input_select.alfen_charge_mode
+        to: "Solar"
     conditions:
-      - condition: template
-        value_template: >
-          {{ states('sensor.alfen_mode3')
-             not in ['A','E','F','unknown','unavailable',''] }}
-    actions:
-      - service: script.alfen_set_current
-        data:
-          amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
-
-  - id: alfen_fuse_guard
-    alias: Alfen fuse guard
-    mode: restart
-    trace:
-      stored_traces: 50
-    triggers:
-      - trigger: time_pattern
-        seconds: "/5"
-    conditions:
-      - condition: template
-        value_template: >
-          {{ states('sensor.alfen_mode3')
-             not in ['A','E','F','unknown','unavailable',''] }}
-      - condition: template
-        value_template: >
-          {{ states('sensor.p1_meter_power_phase_1') not in ['unknown','unavailable']
-             and states('sensor.p1_meter_power_phase_2') not in ['unknown','unavailable']
-             and states('sensor.p1_meter_power_phase_3') not in ['unknown','unavailable'] }}
-      - condition: template
-        value_template: >
-          {% set v = 230 %}
-          {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
-          {% set l1 = (states('sensor.p1_meter_power_phase_1') | float(0)) / v %}
-          {% set l2 = (states('sensor.p1_meter_power_phase_2') | float(0)) / v %}
-          {% set l3 = (states('sensor.p1_meter_power_phase_3') | float(0)) / v %}
-          {% set over = [l1, l2, l3] | max >= fuse %}
-          {% set charging = states('input_number.alfen_target_current') | float(0)
-                            >= states('input_number.alfen_min_current') | float(6) %}
-          {{ over and charging }}
-    actions:
-      - service: input_boolean.turn_on
-        target:
-          entity_id: input_boolean.alfen_protect_lockout
-      - service: script.alfen_set_current
-        data:
-          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-
-  - id: alfen_protect_clear
-    alias: Alfen protection lockout clear
-    mode: restart
-    triggers:
-      - trigger: template
-        value_template: >
-          {{ states('sensor.alfen_headroom_active') | float(0)
-             >= states('input_number.alfen_min_current') | float(6)
-              + states('input_number.alfen_recovery_margin') | float(3) }}
-        for: "00:02:00"
-    conditions:
-      - condition: state
-        entity_id: input_boolean.alfen_protect_lockout
-        state: "on"
-    actions:
-      - service: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.alfen_protect_lockout
       - condition: state
         entity_id: input_select.alfen_charge_mode
         state: "Solar"
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3')
-             not in ['A','E','F','unknown','unavailable',''] }}
-      - condition: template
-        value_template: >
-          {{ states('input_number.alfen_target_current') | float(0)
-             < states('input_number.alfen_min_current') | float(6) }}
-      - condition: template
-        value_template: >
-          {{ states('sensor.alfen_solar_surplus') | float(0)
-             >= states('input_number.alfen_min_current') | float(6) * 230 }}
-      - service: script.alfen_set_current
-        data:
-          amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
-
-  - id: alfen_control
-    alias: Alfen control
-    mode: queued
-    max: 10
-    trace:
-      stored_traces: 100
-    triggers:
-      - trigger: time_pattern
-        seconds: "/20"
-        id: tick
-      - trigger: state
-        entity_id: input_select.alfen_charge_mode
-        id: mode_change
-      - trigger: state
-        entity_id: sensor.alfen_mode3
-        id: mode_change
-      - trigger: state
-        entity_id: input_number.alfen_target_current
-        id: manual_slider
-      - trigger: template
-        value_template: >
-          {{ states('sensor.alfen_solar_surplus') | float(0)
-             >= states('input_number.alfen_min_current') | float(6) * 230 }}
-        for: "00:03:00"
-        id: solar_start
-      - trigger: template
-        value_template: >
-          {{ states('sensor.alfen_solar_surplus') | float(0)
-             < states('input_number.alfen_min_current') | float(6) * 230 }}
-        for: "00:03:00"
-        id: solar_stop
-      - trigger: template
-        value_template: >
-          {{ states('sensor.alfen_solar_surplus') | float(0)
-             >= 3 * states('input_number.alfen_min_current') | float(6) * 230 }}
-        for: "00:03:00"
-        id: phase_up
-      - trigger: template
-        value_template: >
-          {{ states('sensor.alfen_solar_surplus') | float(0)
-             < 3 * states('input_number.alfen_min_current') | float(6) * 230 * 0.9 }}
-        for: "00:03:00"
-        id: phase_down
+          {{ states('sensor.alfen_mode3_state')
+             not in ['A','E','F','unknown','unavailable'] }}
     actions:
+      - variables:
+          minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
+          head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
+          cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
+          phases: "{{ states('sensor.alfen_phases') | int(1) }}"
+          charging: >
+            {{ states('input_number.alfen_target_current') | float(0)
+               >= states('input_number.alfen_min_current') | float(6) }}
+          # Durations: each flag is 'on' and has held for its hold window.
+          start_held: >
+            {{ is_state('binary_sensor.alfen_surplus_over_start','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_surplus_over_start.last_changed))
+                   >= states('input_number.alfen_solar_hold') | float(3) * 60 }}
+          stop_held: >
+            {{ is_state('binary_sensor.alfen_surplus_over_start','off')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_surplus_over_start.last_changed))
+                   >= states('input_number.alfen_solar_hold') | float(3) * 60 }}
+          up_held: >
+            {{ is_state('binary_sensor.alfen_surplus_over_up','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_surplus_over_up.last_changed))
+                   >= states('input_number.alfen_phase_hold') | float(3) * 60 }}
+          down_held: >
+            {{ is_state('binary_sensor.alfen_surplus_under_down','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_surplus_under_down.last_changed))
+                   >= states('input_number.alfen_phase_hold') | float(3) * 60 }}
+          cooldown_ok: >
+            {% set last = state_attr('input_datetime.alfen_last_phase_switch','timestamp') %}
+            {% set cd = states('input_number.alfen_phase_cooldown') | float(12) * 60 %}
+            {{ true if last is none
+               else (now().timestamp() - (last | float(0))) > cd }}
+          newt: >
+            {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
+            {% set ph = states('sensor.alfen_phases') | int(1) %}
+            {% set ph = ph if ph in [1,3] else 1 %}
+            {% set v = 230 %}
+            {% set minc = states('input_number.alfen_min_current') | float(6) %}
+            {% set maxc = states('input_number.alfen_max_current') | float(16) %}
+            {% set head = states('sensor.alfen_headroom_active') | float(99) %}
+            {% set raw = surplus / (ph * v) %}
+            {% set capped = [ raw, maxc, head ] | min %}
+            {{ ([ capped, minc ] | max) | round(0) }}
       - choose:
+          # 1) Not charging, but surplus has held above start for the hold window
+          #    -> start. Always ensure 1-phase first (option 2).
           - conditions:
-              - condition: trigger
-                id: mode_change
-            sequence:
-              - choose:
-                  - conditions:
-                      - condition: template
-                        value_template: >
-                          {{ is_state('input_select.alfen_charge_mode','Off')
-                             or states('sensor.alfen_mode3')
-                                in ['A','E','F','unknown','unavailable',''] }}
-                    sequence:
-                      - service: input_boolean.turn_off
-                        target:
-                          entity_id: input_boolean.alfen_protect_lockout
-                      - service: script.alfen_set_current
-                        data:
-                          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-                  - conditions:
-                      - condition: state
-                        entity_id: input_select.alfen_charge_mode
-                        state: "Solar"
-                    sequence:
-                      - service: input_boolean.turn_off
-                        target:
-                          entity_id: input_boolean.alfen_protect_lockout
-                      - service: script.alfen_set_current
-                        data:
-                          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-                  - conditions:
-                      - condition: state
-                        entity_id: input_select.alfen_charge_mode
-                        state: "Fast"
-                    sequence:
-                      - if:
-                          - condition: template
-                            value_template: "{{ states('sensor.alfen_phases') | int(1) != 3 }}"
-                        then:
-                          - service: script.alfen_switch_phases
-                            data:
-                              phases: 3
-                      - service: script.alfen_set_current
-                        data:
-                          amps: >
-                            {{ [ states('input_number.alfen_max_current') | float(20),
-                                 states('input_number.alfen_phase_limit') | float(16),
-                                 states('sensor.alfen_headroom_active') | float(99) ] | min }}
-                default: []
-
-          - conditions:
-              - condition: trigger
-                id: manual_slider
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Manual"
-            sequence:
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
-
-          - conditions:
-              - condition: trigger
-                id: solar_start
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
-              - condition: state
-                entity_id: input_boolean.alfen_protect_lockout
-                state: "off"
               - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_mode3')
-                     not in ['A','E','F','unknown','unavailable',''] }}
-              - condition: template
-                value_template: >
-                  {{ states('input_number.alfen_target_current') | float(0)
-                     < states('input_number.alfen_min_current') | float(6) }}
+                value_template: "{{ not charging and start_held }}"
             sequence:
-              # If surplus can't sustain 3-phase minimum but we're on 3-phase,
-              # drop to 1-phase first (switch resumes at min). Else start at min.
               - if:
                   - condition: template
-                    value_template: >
-                      {{ states('sensor.alfen_phases') | int(1) == 3
-                         and states('sensor.alfen_solar_surplus') | float(0)
-                             < 3 * states('input_number.alfen_min_current') | float(6) * 230 }}
+                    value_template: "{{ phases != 1 }}"
                 then:
                   - service: script.alfen_switch_phases
                     data:
@@ -557,168 +464,59 @@ automation:
                 else:
                   - service: script.alfen_set_current
                     data:
-                      amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+                      amps: "{{ minc }}"
 
+          # 2) Charging, but surplus has held below start for the hold window -> stop.
+          #    If we were on 3-phase, drop back to 1-phase so a paused charger never
+          #    sits on 3-phase (the next start always begins on 1-phase anyway).
           - conditions:
-              - condition: trigger
-                id: solar_stop
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
               - condition: template
-                value_template: >
-                  {{ states('input_number.alfen_target_current') | float(0)
-                     >= states('input_number.alfen_min_current') | float(6) }}
+                value_template: "{{ charging and stop_held }}"
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ phases == 3 }}"
+                then:
+                  - service: script.alfen_set_phases
+                    data:
+                      phases: 1
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+
+          # 3) Charging, headroom below floor -> pause (fuse can't fit 6 A).
+          - conditions:
+              - condition: template
+                value_template: "{{ charging and (head | float < minc | float) }}"
             sequence:
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
-          # ===== Solar tick-start: begin charging when stopped but surplus is
-          #        sustained-high. Level-triggered, so it works even when the
-          #        edge-triggered solar_start was missed. Phase-aware: starts on
-          #        1-phase when surplus can't sustain 3-phase minimum. =====
+          # 4) Charging on 1-phase, surplus held above up-threshold, cooldown ok -> 3-phase.
           - conditions:
-              - condition: trigger
-                id: tick
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
-              - condition: state
-                entity_id: input_boolean.alfen_protect_lockout
-                state: "off"
               - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_mode3')
-                     not in ['A','E','F','unknown','unavailable',''] }}
-              - condition: template
-                value_template: >
-                  {{ states('input_number.alfen_target_current') | float(0)
-                     < states('input_number.alfen_min_current') | float(6) }}
-              - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_solar_surplus') | float(0)
-                     >= states('input_number.alfen_min_current') | float(6) * 230 }}
-            sequence:
-              - if:
-                  - condition: template
-                    value_template: >
-                      {{ states('sensor.alfen_phases') | int(1) == 3
-                         and states('sensor.alfen_solar_surplus') | float(0)
-                             < 3 * states('input_number.alfen_min_current') | float(6) * 230 }}
-                then:
-                  - service: script.alfen_switch_phases
-                    data:
-                      phases: 1
-                else:
-                  - service: script.alfen_set_current
-                    data:
-                      amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
-
-          # ===== Solar modulate (20s tick): feedback toward the surplus target. =====
-          - conditions:
-              - condition: trigger
-                id: tick
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
-              - condition: template
-                value_template: >
-                  {{ states('sensor.alfen_mode3')
-                     not in ['A','E','F','unknown','unavailable',''] }}
-              - condition: template
-                value_template: >
-                  {{ states('input_number.alfen_target_current') | float(0)
-                     >= states('input_number.alfen_min_current') | float(6) }}
-            sequence:
-              - variables:
-                  minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
-                  head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
-                  surplus: "{{ states('sensor.alfen_solar_surplus') | float(0) }}"
-                  newt: >
-                    {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
-                    {% set ph = states('sensor.alfen_phases') | int(1) %}
-                    {% set ph = ph if ph in [1,3] else 1 %}
-                    {% set v = 230 %}
-                    {% set minc = states('input_number.alfen_min_current') | float(6) %}
-                    {% set maxc = states('input_number.alfen_max_current') | float(20) %}
-                    {% set plim = states('input_number.alfen_phase_limit') | float(16) %}
-                    {% set head = states('sensor.alfen_headroom_active') | float(99) %}
-                    {% set raw = surplus / (ph * v) %}
-                    {% set capped = [ raw, maxc, plim, head ] | min %}
-                    {{ ([ capped, minc ] | max) | round(0) }}
-              - choose:
-                  # Headroom below floor -> fuse-style stop + lockout.
-                  # (Stopping on lack of surplus is handled by the 3-min
-                  #  solar_stop trigger, symmetric with the 3-min start.)
-                  - conditions:
-                      - condition: template
-                        value_template: "{{ head | float < minc | float }}"
-                    sequence:
-                      - service: input_boolean.turn_on
-                        target:
-                          entity_id: input_boolean.alfen_protect_lockout
-                      - service: script.alfen_set_current
-                        data:
-                          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-                default:
-                  - condition: template
-                    value_template: >
-                      {{ (newt | float - states('input_number.alfen_target_current') | float(0))
-                         | abs >= 1 }}
-                  - service: script.alfen_set_current
-                    data:
-                      amps: "{{ newt }}"
-
-          - conditions:
-              - condition: trigger
-                id: phase_up
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
-              - condition: template
-                value_template: "{{ states('sensor.alfen_phases') | int(1) == 1 }}"
-              - condition: template
-                value_template: >
-                  {{ states('input_number.alfen_target_current') | float(0)
-                     >= states('input_number.alfen_min_current') | float(6) }}
-              - condition: template
-                value_template: >
-                  {% set last = states('input_datetime.alfen_last_phase_switch') %}
-                  {% set cd = states('input_number.alfen_phase_cooldown') | float(10) * 60 %}
-                  {{ true if last in ['unknown','unavailable']
-                     else (now() - as_datetime(last)).total_seconds() > cd }}
+                value_template: "{{ charging and phases == 1 and up_held and cooldown_ok }}"
             sequence:
               - service: script.alfen_switch_phases
                 data:
                   phases: 3
 
+          # 5) Charging on 3-phase, surplus held below down-threshold, cooldown ok -> 1-phase.
           - conditions:
-              - condition: trigger
-                id: phase_down
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Solar"
               - condition: template
-                value_template: "{{ states('sensor.alfen_phases') | int(1) == 3 }}"
-              - condition: template
-                value_template: >
-                  {% set v = 230 %}
-                  {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
-                  {% set minc = states('input_number.alfen_min_current') | float(6) %}
-                  {% set ph = states('sensor.alfen_phases') | int(3) %}
-                  {% set amps = states('input_number.alfen_target_current') | float(0) %}
-                  {% set car_l1_now = (amps / 3) if ph == 3 else amps %}
-                  {% set house_l1 = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car_l1_now %}
-                  {{ (house_l1 + minc) <= fuse }}
-              - condition: template
-                value_template: >
-                  {% set last = states('input_datetime.alfen_last_phase_switch') %}
-                  {% set cd = states('input_number.alfen_phase_cooldown') | float(10) * 60 %}
-                  {{ true if last in ['unknown','unavailable']
-                     else (now() - as_datetime(last)).total_seconds() > cd }}
+                value_template: "{{ charging and phases == 3 and down_held and cooldown_ok }}"
             sequence:
               - service: script.alfen_switch_phases
                 data:
                   phases: 1
+
+          # 6) Charging -> modulate toward the surplus target (>=1 A deadband).
+          - conditions:
+              - condition: template
+                value_template: "{{ charging and ((newt | float - cur | float) | abs >= 1) }}"
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ newt }}"
         default: []

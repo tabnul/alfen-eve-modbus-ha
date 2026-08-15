@@ -1,37 +1,45 @@
-### Note: Solar charging broken atm.
-
-
 # Alfen Eve — native Modbus EV charging control for Home Assistant
 
-Solar-surplus, dynamic-price and manual control of an **Alfen Eve Pro-line (NG9xx)** EV
-charger over **native Modbus TCP**, driven entirely from Home Assistant. No custom
-integration — just the built-in `modbus` platform plus template sensors, scripts and a
-handful of automations (a control loop, a keep-alive, a fuse guard, a protection-lockout
-clear, and a startup-resume).
+Solar-surplus and dynamic-price control of an **Alfen Eve Pro-line (NG9xx)** EV charger
+over **native Modbus TCP**, driven entirely from Home Assistant. No custom integration —
+just the built-in `modbus` platform plus template sensors, a couple of scripts, and four
+automations (one Solar control loop, a keep-alive, a fuse guard, and mode routing).
 
-The charger runs in EMS/slave mode: Home Assistant is the sole brain. It writes a
-single current setpoint, switches between 1- and 3-phase, and protects the main fuse
-per phase. Charging follows one of four modes selected from a dropdown.
+The charger runs in EMS/slave mode: Home Assistant is the sole brain. It writes a single
+current setpoint, switches between 1- and 3-phase, and keeps every phase under the fuse.
+Charging follows one of three modes selected from a dropdown.
 
 ## What it does
 
-- **Solar** — charges from genuine solar surplus only. The loop targets a small grid
-  *export* (a configurable margin), so it charges only when there's real surplus and
-  backs off before it would import. It modulates the car's current to track the surplus
-  and switches 1↔3 phase as surplus allows. A heavy anti-oscillation stack (3-minute
-  start/stop holds, a per-phase-switch cooldown, deadband and export margin) keeps it
-  calm on cloudy days.
-- **Fast** — 3-phase at maximum current (clamped by your per-phase and fuse limits).
-  Ignores surplus entirely.
-- **Manual** — you set the target current directly; it's written live.
+- **Solar** — charges from genuine solar surplus only. It always starts on 1-phase,
+  modulates the car's current to track the surplus, and switches up to 3-phase once
+  there's enough sustained surplus to run three phases (then back down as surplus fades).
+  Start, stop and phase changes each wait out a configurable hold, and phase switches are
+  further capped by a cooldown, so it stays calm on a cloudy day.
+- **Fast** — 3-phase at maximum current (clamped by the car max and the fuse guard).
+  Ignores surplus — will import from grid.
 - **Off** — pauses the car.
-- **Per-phase fuse protection** — an always-on guard that pauses charging (in any mode)
-  before any phase reaches your fuse rating, with hysteresis so it can't oscillate.
-- **Clean restart & mode handling** — mode and target survive an HA restart; on restart
-  the engine re-asserts the restored mode (and only resumes Solar charging if there's
-  actual surplus). Selecting Solar always re-baselines to stopped first, then charges
-  only when surplus justifies it.
+- **Per-phase fuse protection** — an always-on guard that keeps every phase under your
+  fuse rating by *adjusting* the charge current down when a phase is loaded and back up
+  when it clears, in any mode. It only pauses if even the 6 A floor won't fit.
+- **Survives restarts** — the selected mode and all tuning values persist across an HA
+  restart. Fast re-applies on boot; Solar picks back up on the next control tick.
 - Full metering, status and control surfaced as HA entities, plus a dashboard.
+
+## How the Solar loop works
+
+One automation (`alfen_solar`) runs every 20 s (and on entering Solar) and dispatches a
+single action per tick via a `choose`, so at most one setpoint write happens per tick —
+this is what keeps it from disturbing the car with rapid writes. It is **level-triggered**:
+each tick re-checks the current conditions rather than relying on a threshold-crossing
+edge, so it can't get stuck because a level was already crossed when a setting changed.
+
+Durations ("surplus above X for N minutes") are measured from the `last_changed` of three
+threshold binary sensors (`alfen_surplus_over_start/up`, `alfen_surplus_under_down`). The
+branches, in priority order: start (if stopped and surplus has held), stop (if charging
+and surplus has fallen — resets to 1-phase as it stops), fuse-pause, phase-up 1→3,
+phase-down 3→1, then modulate (with a ≥1 A deadband). Phase switches use a
+pause→switch→resume script and are gated by a cooldown.
 
 ## Requirements
 
@@ -123,82 +131,76 @@ requires) and records the value into `input_number.alfen_target_current`.
 
 **Keep-alive.** The setpoint falls back to safe current if not refreshed within ~60 s.
 `alfen_setpoint_renew` rewrites 1210 every 30 s whenever a car is connected. It is a
-**standalone** automation (not merged into the control loop) so the control queue can
-never delay it — this is what keeps the charger off its safe-current fallback.
+**standalone** automation (not part of the control loop) so nothing can delay it — this
+is what keeps the charger off its safe-current fallback.
 
 **Phase switching.** Writing `1` or `3` to register **1215** switches phases, but doing so
-live makes the car re-negotiate and some fault. `alfen_switch_phases` therefore does
-**pause → wait 10 s → write 1215 → wait 5 s → resume at min** every time. Expect a ~15 s
-charging gap on every phase change. Each switch also stamps
-`input_datetime.alfen_last_phase_switch` for the cooldown guard.
+live makes the car re-negotiate and can fault. `alfen_switch_phases` therefore does
+**pause → wait 10 s → write 1215 → wait 5 s → resume at min**. Expect a ~15 s charging gap
+on every phase change. Each switch stamps `input_datetime.alfen_last_phase_switch`
+(as a Unix timestamp) for the cooldown guard.
 
-**Single control loop.** `alfen_control` handles everything by dispatching on trigger id
-(`tick`, `mode_change`, `manual_slider`, `solar_start/stop`, `phase_up/down`). Solar
-modulation runs on a **20 s tick** (aligned to a slow P1 meter) and computes the target
-as `min(surplus_current, max, phase_limit, headroom)` bounded below by the 6 A floor,
-writing only on a ≥1 A change (deadband).
+**Control loop.** `alfen_solar` runs every 20 s and on entering Solar, dispatching one
+action per tick via a `choose`. Modulation computes the target as
+`min(surplus / (phases × 230), max_current, headroom)`, floored at 6 A, and writes only on
+a ≥1 A change (deadband). Because it re-checks every tick (level-triggered) rather than
+firing on a threshold-crossing edge, it can't get stuck if a level was already crossed
+when a setting changed.
 
-**Solar surplus.** `alfen_solar_surplus = charger_power − grid − export_margin`. The
-export margin (default 300 W) shifts the operating point so the loop targets a small
-export rather than grid-zero — it charges only from genuine surplus and never imports at
-the edge. Set the margin to 0 for old grid-zero behaviour, higher for stricter
-solar-only. The sensor carries an `availability` guard so a brief `alfen_power_sum`
-dropout doesn't corrupt the value.
+**Solar surplus.** `alfen_solar_surplus = charger_power − grid`. It is independent of the
+car's own draw (the car's power appears in both terms and cancels), so a running car
+doesn't hide the surplus. Three binary sensors flag it against the start / phase-up /
+phase-down thresholds; the loop measures how long each has held from its `last_changed`.
 
-**Mode entry re-baselines.** `mode_change` handles Off/disconnect (stop), **Solar (stop
-— then the loop starts charging only when `solar_start` sees real surplus)**, and Fast
-(3-phase + max). So switching into Solar from Fast never coasts at Fast's high current —
-it drops to stopped immediately and comes up only on genuine sun.
+**Phase decisions.** Solar always starts on **1-phase**. It switches up to 3-phase only
+once surplus holds above `alfen_phase_up_threshold` for the phase hold, and drops back to
+1-phase when surplus holds below `alfen_phase_down_threshold`. A **cooldown**
+(`alfen_phase_cooldown`) caps how often a switch can happen in either direction, and a
+full stop resets to 1-phase so a paused charger never sits on 3-phase.
 
-**Anti-oscillation.** Symmetric 3-minute holds on solar_start and solar_stop; 3-minute
-holds plus a 10 % margin on the phase up/down thresholds; a configurable
-**per-phase-switch cooldown** (`alfen_phase_cooldown`, default 10 min) that hard-caps how
-often 1↔3 switching can happen regardless of surplus; a 1 A modulate deadband; and the
-300 W export margin. Together these keep it from thrashing on a flickering cloudy day.
+**Anti-oscillation.** Configurable holds on start/stop (`alfen_solar_hold`) and on phase
+switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); and the
+1 A modulate deadband. Together these keep it from thrashing on a flickering cloudy day.
 
 ## Fuse protection
 
-The charger's own load balancing is off (pure EMS), so protecting the main fuse is HA's
-job. It's a **soft** limit — reactive at the automation cadence, not a substitute for the
-physical breaker — but it prevents nuisance trips in normal operation.
+The charger's own load balancing is off (pure EMS), so keeping the main fuse safe is HA's
+job. It's a **soft** limit — reactive at the guard cadence, not a substitute for the
+physical breaker — but it prevents nuisance trips in normal operation, and rather than
+cutting the car off it **adjusts** the current to fit.
 
-- **Per-phase headroom** (`alfen_headroom_l1/l2/l3`) = fuse rating − house load on that
-  phase (P1 phase power minus the car's own draw). `alfen_headroom_active` is the one
-  that governs the current mode: L1 only in 1-phase, tightest of the three in 3-phase.
-- **Fuse guard** (`alfen_fuse_guard`, every 5 s, **all modes**) pauses the car if any
-  phase's total current (house + car) reaches the fuse rating.
-- **Phase-down safety** — a 3→1 switch only happens if L1 can actually hold a 1-phase
-  charge afterward, so it never switches *into* an overload.
-- **Hysteresis / anti-oscillation** — when protection stops the car it latches
-  `input_boolean.alfen_protect_lockout`. Resume is blocked until headroom has been at
-  `min + recovery_margin` (default +3 A) for a continuous **2 minutes**
-  (`alfen_protect_clear`), then Solar is kick-started. This stops the "stop → headroom
-  recovers → restart → overload → stop" bounce.
+- **Per-phase headroom** (`alfen_headroom_l1/l2/l3`) = fuse rating − other house load on
+  that phase. `alfen_headroom_active` governs the current mode: L1 in 1-phase, tightest of
+  the three in 3-phase.
+- **Fuse guard** (`alfen_fuse_guard`, every 5 s, **all modes**) keeps every phase under
+  `alfen_fuse_per_phase`. In Fast it trims the car down when a phase is loaded and back up
+  to max when it clears; in Solar the modulate loop already clamps to headroom, so the
+  guard there just pauses if even the 6 A floor won't fit. A deadband stops it churning.
 
-**Set `alfen_fuse_per_phase` to a safe per-phase value** — a couple of amps below your
-real main fuse rating (e.g. 23 on a 25 A connection), so the guard acts before the
-breaker does. This is per phase: a 3×25 A connection is 25 A *per phase*.
+**Set `alfen_fuse_per_phase` to the total per-phase current you'll allow** (car + other
+household load on that phase), a little below your real fuse — e.g. **24 A under a 25 A
+fuse**. The guard holds total phase current under this figure.
 
 ## Tunable settings (helpers)
 
-All tuning is via `input_number` / `input_select` helpers — no YAML logic edits.
+All tuning is via `input_number` / `input_select` helpers — no YAML logic edits. None have
+a fixed `initial:`, so **your values persist across restarts**; each shows a suggested
+starting value on the dashboard, and the templates fall back to that suggestion if a
+helper is ever left blank.
 
-| Helper | Meaning |
-| --- | --- |
-| `alfen_max_current` | Full-power ceiling. |
-| `alfen_phase_limit` | Hard per-phase cap on the car's own draw. |
-| `alfen_fuse_per_phase` | Per-phase fuse rating the guard trips at (set with margin). |
-| `alfen_export_margin` | Watts of export to keep in reserve; 0 = grid-zero, higher = stricter solar-only. Default 300. |
-| `alfen_phase_cooldown` | Minutes to block further 1↔3 phase switches after one. Default 10. |
-| `alfen_min_current` | The 6 A IEC floor; the loop never charges below this while intending to charge. |
-| `alfen_stop_current` | The "off" value written to pause (below the 6 A floor). |
-| `alfen_recovery_margin` | Hysteresis band: resume only when headroom ≥ min + this. |
-| `alfen_charge_mode` | Off / Solar / Fast / Manual. |
-| `alfen_price_fallback` | Mode entered when a price window closes (used by the price layer). |
-
-The hysteresis hold times live in the automation (`for:` durations on the solar/phase
-triggers, and the 2-minute dwell in `alfen_protect_clear`) — HA can't template a trigger
-`for:`, so those stay in YAML; the cooldown, being a condition, is a live helper.
+| Helper | Meaning | Suggested |
+| --- | --- | --- |
+| `alfen_max_current` | Car's charge-rate ceiling per phase. | 16 A |
+| `alfen_min_current` | The 6 A IEC floor; never charges below this. | 6 A |
+| `alfen_stop_current` | The "off" value written to pause (below 6 A). | 5 A |
+| `alfen_fuse_per_phase` | Total per-phase current cap (car + house). | 24 A |
+| `alfen_phase_up_threshold` | Surplus (W) to switch 1→3 phase. | 4800 W |
+| `alfen_phase_down_threshold` | Surplus (W) to switch 3→1 phase. | 4140 W |
+| `alfen_phase_cooldown` | Minutes blocking any further phase switch. | 12 min |
+| `alfen_solar_hold` | Minutes surplus must hold before start/stop. | 3 min |
+| `alfen_phase_hold` | Minutes surplus must hold before a phase switch. | 3 min |
+| `alfen_charge_mode` | Off / Solar / Fast. | — |
+| `alfen_price_fallback` | Mode entered when a price window closes (price layer). | Solar |
 
 ## Register reference
 
@@ -232,9 +234,9 @@ Do this in order so a failure points at one layer:
    `sensor.alfen_setpoint_accounted_for` → 1. That validates the whole write path.
 3. **Set `alfen_fuse_per_phase` to your real safe rating** before anything else — a wrong
    (too-low) value clamps or trips everything.
-4. Mode → **Manual**, drag the target slider, confirm the readback tracks it live.
-5. Try **Solar** and **Fast**, and the Force-phase buttons.
-6. Load the dashboard; wire the price layer last.
+4. Try **Solar** and **Fast**, and the Force-phase buttons; in Fast, add a household load
+   on a phase and confirm the fuse guard trims the car and recovers when it clears.
+5. Load the dashboard; wire the price layer last.
 
 ## Known limitations & gotchas
 
@@ -244,35 +246,32 @@ Do this in order so a failure points at one layer:
   charger power register — verify `sensor.alfen_power_sum` reports before relying on
   Solar.
 - **Integer-amp control** — the setpoint steps in whole amps, so ~230 W (1-phase) or
-  ~690 W (3-phase) of granularity per step is unavoidable; the export margin absorbs this
-  so it stays on the export side. Inherent to amp-stepped charging, not a bug.
-- **Solar starts slowly by design** — surplus must hold above threshold for 3 minutes
-  before charging begins, and stop takes 3 minutes too (symmetric, to minimise relay
-  wear). On a marginal day it will pause more and charge less; that's the "only charge on
-  genuine solar" trade-off.
-- **After an HA restart**, mode and target are restored (they survive the restart). The
-  engine drops off the safe-current fallback, then re-asserts the restored mode — Fast
-  resumes at max, Manual at its target, and Solar resumes charging only if there's actual
-  surplus (otherwise it waits at stop). Solar can take up to ~3 min to (re)start once sun
-  is present, due to the start hold.
+  ~690 W (3-phase) of granularity per step is unavoidable. Inherent to amp-stepped
+  charging, not a bug.
+- **Solar has holds by design** — surplus must hold above the start threshold for the
+  start/stop hold before charging begins (and below it before stopping), and above the
+  phase-up threshold for the phase hold before going 3-phase. On a marginal day it pauses
+  more and switches less; that's the trade-off for not thrashing. All holds are tunable.
+- **After an HA restart**, the selected mode and all tuning values are restored (no helper
+  has a fixed `initial:`, so HA restores the last value). Fast re-applies on boot; Solar
+  resumes on the next 20 s control tick if there's surplus. *On the very first reload after
+  removing the `initial:` values, the helpers may be blank — set them once from the
+  dashboard (suggested values are shown inline) and they persist thereafter.*
 - **Autonomous charging during an HA outage** — while HA is *down* longer than the ~60 s
   setpoint validity, the charger falls back to **safe current** and charges on its own,
   outside all HA logic. Nothing in HA can prevent this while HA is down; the only fix is
   to set **Safe current to 0** (or the lowest accepted) in the Service Installer, so the
   fallback pauses instead of charging.
 - **Phase switches cost ~15 s** of charging each (the pause-switch-resume), and are capped
-  to at most one per `alfen_phase_cooldown` (default 10 min) in either direction. A
-  blocked phase-down means it holds 3-phase (importing a little, bounded) or pauses until
-  the cooldown clears — the accepted cost of not switching too often.
+  to at most one per `alfen_phase_cooldown` in either direction.
 - **2 Modbus TCP connections max** — if EVCC or another master is still connected, HA's
   writes can be refused for lack of a slot. Run only HA against the charger.
 - **Fuse protection is soft** — reactive at the 5 s guard cadence, and it fails *open*
   (does nothing) if P1 data is missing. It reduces nuisance trips; it is not the breaker.
-- **Reallin meter** — this unit's per-phase currents and voltages read fine, but some
-  aggregate power/energy registers can drop out. Solar surplus is built on
-  `alfen_power_sum`; the `availability` guard on the surplus sensor stops brief dropouts
-  from corrupting the loop, but chronic dropout is a Modbus/hardware issue to chase
-  separately.
+- **The car is a second controller.** Some EVs refuse to charge at low currents, drop the
+  pilot (Mode 3 → B1/E/F), or won't hold 3-phase without enough power — behaviour that can
+  look like a control bug but is car-side. Mode 3 = C means it's actually drawing; A/E/F or
+  B1 flapping points at the cable or car, not the integration.
 
 ## The optional price layer
 
