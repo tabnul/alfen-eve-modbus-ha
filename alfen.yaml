@@ -138,6 +138,28 @@ template:
           {{ l1 | round(1) }}
           {% endif %}
 
+      # Human-readable Mode 3 (IEC 61851) state.
+      - name: alfen_mode3_text
+        unique_id: alfen_mode3_text
+        icon: mdi:ev-station
+        state: >
+          {% set s = states('sensor.alfen_mode3_state') %}
+          {% set m = {
+            'A':  'No vehicle connected',
+            'B':  'Vehicle connected',
+            'B1': 'Vehicle connected',
+            'B2': 'Vehicle connected, ready',
+            'C':  'Charging',
+            'C1': 'Connected, not charging',
+            'C2': 'Charging',
+            'D':  'Charging (ventilation)',
+            'D1': 'Charging (ventilation)',
+            'D2': 'Charging (ventilation)',
+            'E':  'Error / no supply',
+            'F':  'Charge point unavailable'
+          } %}
+          {{ m.get(s, s) }}
+
 script:
   alfen_set_current:
     fields:
