@@ -93,7 +93,6 @@ input_select:
     options:
       - "Off"
       - "Solar"
-    initial: "Solar"
 
 template:
   - binary_sensor:
