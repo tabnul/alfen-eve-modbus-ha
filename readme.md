@@ -181,6 +181,21 @@ cutting the car off it **adjusts** the current to fit.
 household load on that phase), a little below your real fuse — e.g. **24 A under a 25 A
 fuse**. The guard holds total phase current under this figure.
 
+## Metering — charging energy
+
+`sensor.alfen_energy_consumed_total_kwh` is the total energy consumed by charging, in kWh
+(`device_class: energy`, `state_class: total_increasing`), so it can be added to the HA
+**Energy dashboard** and long-term statistics. It's derived from the charger's Wh
+delivered-energy register (÷1000).
+
+This is **AC energy fed from the charger to the car** — i.e. what you drew and paid for.
+The Alfen is an AC charger, so this is the only meaningful energy figure it can report;
+the AC→DC conversion losses (~10–15%) happen inside the car's onboard charger, downstream
+of any meter the charger or HA can see, so "energy actually stored in the battery" is not
+obtainable here — only the car's own telemetry knows that. For cost and consumption
+tracking, the AC figure is the correct one. (The charger's separate `energy_consumed`
+register is dead on this meter and is not used.)
+
 ## Tunable settings (helpers)
 
 All tuning is via `input_number` / `input_select` helpers — no YAML logic edits. None have
@@ -241,10 +256,11 @@ Do this in order so a failure points at one layer:
 ## Known limitations & gotchas
 
 - **Reallin meter (post-2021 units)** only expose a subset of measurement registers over
-  Modbus; some power/energy/current-sum registers may read NaN. Voltages and per-phase
-  current are what the control logic needs; the Solar loop's surplus depends on the
-  charger power register — verify `sensor.alfen_power_sum` reports before relying on
-  Solar.
+  Modbus; several aggregate registers read NaN / never populate. On this build,
+  `alfen_current_sum` and `alfen_energy_consumed_sum` are dead and are not used. Voltages,
+  per-phase current, charger power, and **energy delivered** all report fine — and energy
+  delivered is what matters (see Metering below). Verify `sensor.alfen_power_sum` reports
+  before relying on Solar.
 - **Integer-amp control** — the setpoint steps in whole amps, so ~230 W (1-phase) or
   ~690 W (3-phase) of granularity per step is unavoidable. Inherent to amp-stepped
   charging, not a bug.
