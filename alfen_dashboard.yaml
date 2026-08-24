@@ -165,8 +165,8 @@ views:
           - type: entities
             title: Energy & quality
             entities:
-              - entity: sensor.alfen_energy_delivered_kwh
-                name: Energy delivered
+              - entity: sensor.alfen_energy_consumed_total_kwh
+                name: Energy consumed (total)
               - sensor.alfen_frequency
               - sensor.alfen_pf_sum
           - type: entities

@@ -198,10 +198,11 @@ template:
           {{ l1 | round(1) }}
           {% endif %}
 
-      # kWh version of the Wh energy delivered total (for display + Energy dashboard).
-      # (energy_consumed_sum is not populated on this meter, so it's omitted.)
-      - name: alfen_energy_delivered_kwh
-        unique_id: alfen_energy_delivered_kwh
+      # Total AC energy consumed by charging, in kWh (for display + Energy dashboard).
+      # (energy_consumed_sum is not populated on this meter; this is derived from the
+      #  charger's delivered-energy register, which is the AC energy fed to the car.)
+      - name: alfen_energy_consumed_total_kwh
+        unique_id: alfen_energy_consumed_total_kwh
         unit_of_measurement: kWh
         device_class: energy
         state_class: total_increasing
