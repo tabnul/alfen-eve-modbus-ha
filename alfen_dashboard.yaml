@@ -156,7 +156,6 @@ views:
               - sensor.alfen_current_l1
               - sensor.alfen_current_l2
               - sensor.alfen_current_l3
-              - sensor.alfen_current_sum
           - type: entities
             title: Voltages
             entities:
@@ -166,8 +165,8 @@ views:
           - type: entities
             title: Energy & quality
             entities:
-              - sensor.alfen_energy_delivered_sum
-              - sensor.alfen_energy_consumed_sum
+              - entity: sensor.alfen_energy_delivered_kwh
+                name: Energy delivered
               - sensor.alfen_frequency
               - sensor.alfen_pf_sum
           - type: entities

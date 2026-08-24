@@ -93,6 +93,7 @@ input_select:
     options:
       - "Off"
       - "Solar"
+    initial: "Solar"
 
 template:
   - binary_sensor:
@@ -196,6 +197,18 @@ template:
           {% else %}
           {{ l1 | round(1) }}
           {% endif %}
+
+      # kWh version of the Wh energy delivered total (for display + Energy dashboard).
+      # (energy_consumed_sum is not populated on this meter, so it's omitted.)
+      - name: alfen_energy_delivered_kwh
+        unique_id: alfen_energy_delivered_kwh
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        availability: >
+          {{ states('sensor.alfen_energy_delivered_sum') not in ['unknown','unavailable'] }}
+        state: >
+          {{ (states('sensor.alfen_energy_delivered_sum') | float(0) / 1000) | round(3) }}
 
 script:
   alfen_set_current:
