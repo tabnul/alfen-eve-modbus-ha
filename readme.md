@@ -48,7 +48,9 @@ pause→switch→resume script and are gated by a cooldown.
 - The **Active Load Balancing** licence on the charger (paid unlock from Alfen). Without
   it the Modbus slave functionality can't be enabled.
 - **ACE Service Installer** access (a service-level Alfen account) to configure the
-  charger — see below.
+  charger — see below. **Set the Modbus setpoint Validity time to 300 s** there (not the
+  60 s default) — this keeps charging alive across an HA restart and is EVCC's recommended
+  value; details in the charger-configuration section.
 - A **HomeWizard P1** meter (or any P1 meter) exposing **total** and **per-phase** active
   power. Grid import must read positive, export negative.
 - Home Assistant with the built-in `modbus` integration, packages enabled, and the
@@ -82,7 +84,15 @@ All of this is set in the **ACE Service Installer** app, connected to the charge
 **TCP/IP EMS:**
 
 - Mode — **Socket**
-- Validity time — **60 s** (default; keep it — the keep-alive rewrites every 30 s)
+- Validity time — **300 s** *(recommended — see below; do not leave at the 60 s default)*
+
+**Set the validity time to 300 s, not the 60 s default.** This is the window the charger
+keeps a written setpoint valid before falling back to Safe current. EVCC recommends 300 s
+for Alfen, and it buys two things: (1) an HA restart (which takes well under 5 min) no
+longer causes the charger to drop the setpoint mid-charge — charging continues across the
+reboot; and (2) generous margin against any write-timing jitter, so a delayed keep-alive
+can never trip the fallback. The keep-alive still rewrites every 30 s, now comfortably
+inside the window. There is no downside to 300 s for an EMS/slave setup.
 
 On firmware 7.4.5 there are **no separate "Allow reading / Allow writing maximum
 currents" checkboxes** — enabling Active Load Balancing with the EMS data source and
@@ -129,8 +139,9 @@ never writes current or phases directly, so it can't fight the engine.
 two 16-bit words (big-endian IEEE-754, single multi-register write, as the charger
 requires) and records the value into `input_number.alfen_target_current`.
 
-**Keep-alive.** The setpoint falls back to safe current if not refreshed within ~60 s.
-`alfen_setpoint_renew` rewrites 1210 every 30 s whenever a car is connected. It is a
+**Keep-alive.** The setpoint falls back to Safe current if it isn't refreshed within the
+configured validity time (set to 300 s — see charger config). `alfen_setpoint_renew`
+rewrites 1210 every 30 s whenever a car is connected — far inside the window. It is a
 **standalone** automation (not part of the control loop) so nothing can delay it — this
 is what keeps the charger off its safe-current fallback.
 
@@ -273,11 +284,12 @@ Do this in order so a failure points at one layer:
   resumes on the next 20 s control tick if there's surplus. *On the very first reload after
   removing the `initial:` values, the helpers may be blank — set them once from the
   dashboard (suggested values are shown inline) and they persist thereafter.*
-- **Autonomous charging during an HA outage** — while HA is *down* longer than the ~60 s
-  setpoint validity, the charger falls back to **safe current** and charges on its own,
-  outside all HA logic. Nothing in HA can prevent this while HA is down; the only fix is
-  to set **Safe current to 0** (or the lowest accepted) in the Service Installer, so the
-  fallback pauses instead of charging.
+- **Autonomous charging during an HA outage** — while HA is *down* longer than the
+  setpoint validity window (300 s), the charger falls back to **Safe current** and charges
+  on its own, outside all HA logic. The 300 s window means a normal HA restart rides
+  through without a fallback; only a genuine multi-minute outage triggers it. Nothing in HA
+  can prevent it while HA is down; the only fix is to set **Safe current to 0** (or the
+  lowest accepted) in the Service Installer, so the fallback pauses instead of charging.
 - **Phase switches cost ~15 s** of charging each (the pause-switch-resume), and are capped
   to at most one per `alfen_phase_cooldown` in either direction.
 - **2 Modbus TCP connections max** — if EVCC or another master is still connected, HA's
