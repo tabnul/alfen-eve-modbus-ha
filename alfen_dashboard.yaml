@@ -1,5 +1,5 @@
 # =====================================================================
-#  ALFEN EVE PRO - DASHBOARD  (Sections View with Complete Help Text)
+#  ALFEN EVE PRO - DASHBOARD (Sections View - Full Text & Modern Layout)
 # =====================================================================
 
 views:
@@ -8,8 +8,11 @@ views:
     type: sections
     max_columns: 3
     sections:
+      # -------------------------------------------------------------
+      # COLUMN 1: CONTROLS & TUNING
+      # -------------------------------------------------------------
       - type: grid
-        title: Control & Tuning
+        title: Mode & Controls
         cards:
           - type: entities
             entities:
@@ -19,11 +22,11 @@ views:
 
           - type: markdown
             content: >-
-              <ha-alert alert-type="info">Charge Modes Explanation</ha-alert>
+              <ha-alert alert-type="info">Modes</ha-alert>
 
-              **Off** — Pauses the car.
+              **Off** — pauses the car.
 
-              **Solar** — Charges from solar surplus only. Starts on 1-phase, switches up to 3-phase when there is enough sustained surplus, and modulates the current to track the sun. Pauses when surplus runs out.
+              **Solar** — charges from solar surplus only. Starts on 1-phase, switches up to 3-phase when there is enough sustained surplus, and modulates the current to track the sun. Pauses when surplus runs out.
 
               **Fast** — 3-phase at maximum current (clamped by the phase and fuse limits). Ignores surplus — will import from grid. If a phase nears the fuse limit it trims the current down, then recovers back to max when the load clears (subject to the post-stop recovery cooldown if forced to pause).
             text_only: true
@@ -35,31 +38,53 @@ views:
           - type: tile
             entity: input_select.alfen_charge_mode
             name: Charge Mode
+            icon: mdi:ev-station
+
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Force 1-Phase
+                icon: mdi:numeric-1-circle-outline
+                show_state: false
+                tap_action:
+                  action: perform-action
+                  perform_action: script.alfen_switch_phases
+                  data:
+                    phases: 1
+              - type: button
+                name: Force 3-Phase
+                icon: mdi:numeric-3-circle-outline
+                show_state: false
+                tap_action:
+                  action: perform-action
+                  perform_action: script.alfen_switch_phases
+                  data:
+                    phases: 3
 
           - type: heading
             heading: Limits & Safety
 
           - type: markdown
             content: >-
-              <ha-alert alert-type="info">Limits & Safety Settings</ha-alert>
+              <ha-alert alert-type="info">Limits</ha-alert>
 
-              **Max current** — The car's charge-rate ceiling per phase (the car's own max, default 16 A).
+              **Max current** — the car's charge-rate ceiling per phase (the car's own max, default 16 A).
 
-              **Min current** — The 6 A IEC floor; charging never runs below this.
+              **Min current** — the 6 A IEC floor; charging never runs below this.
 
-              **Stop current** — The value written to pause the car (below 6 A, default 5 A).
+              **Stop current** — the value written to pause the car (below 6 A).
 
-              **Fuse per phase** — The TOTAL per-phase current cap (car + all other household devices). The fuse guard reads each phase's total from the P1 meter and trims the car's current to keep every phase under this, recovering when load clears. Set it just below your real fuse rating (e.g. 24 A under a 25 A fuse). Only pauses if even 6 A won't fit.
+              **Fuse per phase** — the TOTAL per-phase current cap (car + all other household devices). The fuse guard reads each phase's total from the P1 meter and trims the car's current to keep every phase under this, recovering when load clears. Set it just below your real fuse rating (e.g. 24 A under a 25 A fuse). Only pauses if even 6 A won't fit.
 
-              **Step down buffer (safety)** — Minimum Ampere drop required before stepping current down (default 1 A). Controls how fast safety kicks in.
+              **Step down buffer (safety)** — minimum Ampere drop required before stepping current down (default 1 A). Controls how fast safety kicks in.
 
-              **Step up buffer (recovery)** — Minimum Ampere recovery required before stepping current back up (default 3 A). Prevents setpoint hunting.
+              **Step up buffer (recovery)** — minimum Ampere recovery required before stepping current back up (default 3 A). Prevents setpoint hunting.
 
-              **Fuse guard settle time** — Duration in seconds that headroom must remain low before Fuse Guard steps down (default 5 s, max 20 s). Ignores short telemetry drops caused by P1 meter and Modbus desynchronization.
+              **Fuse guard settle time** — duration in seconds that headroom must remain low before Fuse Guard steps down (default 5 s, max 20 s). Ignores short telemetry drops caused by P1 meter and Modbus desynchronization.
 
-              **Post-stop recovery cooldown** — Duration in minutes that Fast mode recovery must wait before restarting charging after a stop (default 5 min).
+              **Post-stop recovery cooldown** — duration in minutes that Fast mode recovery must wait before restarting charging after a stop (default 5 min).
 
-              **Enforce 6A hard floor** — When enabled, target current will never drop below 6 A (IEC minimum). Prevents intermediate setpoints (1–5 A) from dropping the Mode 3 state and triggering session restarts during P1/Modbus telemetry drops.
+              **Enforce 6A hard floor** — when enabled, target current will never drop below 6 A (IEC minimum). Prevents intermediate setpoints (1–5 A) from dropping the Mode 3 state and triggering session restarts during P1/Modbus telemetry drops.
             text_only: true
             visibility:
               - condition: state
@@ -97,17 +122,19 @@ views:
 
           - type: markdown
             content: >-
-              <ha-alert alert-type="info">Solar Phase Tuning Settings</ha-alert>
+              <ha-alert alert-type="info">Solar tuning</ha-alert>
 
-              **Phase up at (W)** — Surplus needed, held for the *phase switch hold*, before switching 1 → 3 phase. Higher = stays on 1-phase longer, switches up only with comfortable margin. Default 4800 W.
+              **Phase up at (W)** — surplus needed, held for the *phase switch hold*, before switching 1 → 3 phase. Higher = stays on 1-phase longer, switches up only with comfortable margin. Default 4800 W.
 
-              **Phase down at (W)** — When surplus drops below this (held for the *phase switch hold*), it switches 3 → 1 phase. Default 4140 W (the 3-phase minimum, 3 × 6 A).
+              **Phase down at (W)** — when surplus drops below this (held for the *phase switch hold*), it switches 3 → 1 phase. Default 4140 W (the 3-phase minimum, 3 × 6 A).
 
-              **Phase switch cooldown** — Minimum time between *any* two phase switches, in either direction. This is the main anti-thrash guard: even if surplus wobbles across the thresholds, it can't switch more than once per this window. Default 12 min.
+              **Phase switch cooldown** — minimum time between *any* two phase switches, in either direction. This is the main anti-thrash guard: even if surplus wobbles across the thresholds, it can't switch more than once per this window. Default 12 min.
 
-              **Start/stop hold** — How long surplus must stay above (to start) or below (to stop) the 1-phase minimum before Solar acts. Prevents flapping on passing clouds. Default 3 min.
+              **Start/stop hold** — how long surplus must stay above (to start) or below (to stop) the 1-phase minimum before Solar acts. Prevents flapping on passing clouds. Default 3 min.
 
-              **Phase switch hold** — How long the surplus condition must persist before a 1 ↔ 3 phase switch. Separate from start/stop so phase changes (which briefly pause charging) can be made more conservative. Default 3 min.
+              **Phase switch hold** — how long the surplus condition must persist before a 1 ↔ 3 phase switch. Separate from start/stop so phase changes (which briefly pause charging) can be made more conservative. Default 3 min.
+
+              *Note: after changing a hold value, reload automations for it to take effect. Thresholds and cooldown apply immediately.*
             text_only: true
             visibility:
               - condition: state
@@ -131,126 +158,131 @@ views:
               - entity: input_datetime.alfen_last_stop
                 name: Last charging stop
 
-          - type: horizontal-stack
-            cards:
-              - type: button
-                name: Force 1-phase
-                icon: mdi:numeric-1-circle-outline
-                show_state: false
-                tap_action:
-                  action: perform-action
-                  perform_action: script.alfen_switch_phases
-                  data:
-                    phases: 1
-              - type: button
-                name: Force 3-phase
-                icon: mdi:numeric-3-circle-outline
-                show_state: false
-                tap_action:
-                  action: perform-action
-                  perform_action: script.alfen_switch_phases
-                  data:
-                    phases: 3
-
+      # -------------------------------------------------------------
+      # COLUMN 2: TELEMETRY & LIVE POWER
+      # -------------------------------------------------------------
       - type: grid
-        title: Status & Telemetry
+        title: Live Status & Telemetry
         cards:
           - type: tile
             entity: sensor.alfen_mode3_text
             name: EV Status
-          - type: tile
-            entity: sensor.alfen_mode3_state
-            name: Mode 3 (raw)
+            icon: mdi:car-electric
           - type: tile
             entity: sensor.alfen_phases
-            name: Phases
+            name: Active Phases
+            icon: mdi:sine-wave
           - type: tile
             entity: sensor.alfen_actual_applied_max_current
             name: Applied Current
-          - type: tile
-            entity: sensor.alfen_setpoint_readback
-            name: Setpoint
-          - type: tile
-            entity: sensor.alfen_setpoint_valid_time
-            name: Setpoint Valid
-          - type: tile
-            entity: sensor.alfen_setpoint_accounted_for
-            name: Accounted For
-          - type: tile
-            entity: sensor.alfen_availability
-            name: Availability
+            icon: mdi:current-ac
           - type: tile
             entity: sensor.alfen_temperature
-            name: Temperature
+            name: Station Temp
+            icon: mdi:thermometer
 
-      - type: grid
-        title: Power & Fuse Headroom
-        cards:
+          - type: entities
+            title: Modbus Diagnostics
+            entities:
+              - entity: sensor.alfen_mode3_state
+                name: Raw Mode 3 State
+              - entity: sensor.alfen_setpoint_readback
+                name: Setpoint Readback
+              - entity: sensor.alfen_setpoint_valid_time
+                name: Setpoint Valid Time (s)
+              - entity: sensor.alfen_setpoint_accounted_for
+                name: Setpoint Accounted For
+              - entity: sensor.alfen_availability
+                name: Charger Availability
+
+          - type: heading
+            heading: Live Power & Headroom
+
           - type: tile
             entity: sensor.alfen_solar_surplus
             name: Solar Surplus
+            icon: mdi:solar-power
           - type: tile
             entity: sensor.alfen_power_sum
-            name: Charger Power
+            name: Charger Draw
+            icon: mdi:lightning-bolt
           - type: tile
             entity: sensor.p1_meter_power
-            name: Grid Power
+            name: Net Grid Power
+            icon: mdi:transmission-tower
+
           - type: entities
-            title: Per-Phase Fuse Headroom
+            title: Fuse Headroom Breakdown
             entities:
               - entity: sensor.alfen_headroom_active
-                name: Active Headroom (governs loop)
+                name: Active Headroom (Governing)
               - entity: sensor.alfen_headroom_l1
-                name: Headroom L1
+                name: Headroom L1 (A)
               - entity: sensor.alfen_headroom_l2
-                name: Headroom L2
+                name: Headroom L2 (A)
               - entity: sensor.alfen_headroom_l3
-                name: Headroom L3
-              - entity: input_number.alfen_fuse_per_phase
-                name: Fuse Per Phase (Total Cap)
+                name: Headroom L3 (A)
+
           - type: custom:apexcharts-card
             grid_options:
               columns: full
             header:
               show: true
-              title: Charger Power & Solar Surplus
+              title: Power Tracking (6h)
             graph_span: 6h
             series:
               - entity: sensor.alfen_power_sum
-                name: Charger
+                name: Charger Power
                 stroke_width: 2
+                color: "#1877F2"
               - entity: sensor.alfen_solar_surplus
-                name: Surplus
+                name: Solar Surplus
                 stroke_width: 2
+                color: "#10B981"
 
+      # -------------------------------------------------------------
+      # COLUMN 3: METERING & HARDWARE
+      # -------------------------------------------------------------
       - type: grid
-        title: Energy Metering
+        title: Energy & Hardware
         cards:
+          - type: tile
+            entity: sensor.alfen_energy_consumed_total_kwh
+            name: Total Delivered Energy
+            icon: mdi:counter
+
           - type: entities
-            title: Currents
+            title: Phase Currents (A)
             entities:
-              - sensor.alfen_current_l1
-              - sensor.alfen_current_l2
-              - sensor.alfen_current_l3
+              - entity: sensor.alfen_current_l1
+                name: L1 Current
+              - entity: sensor.alfen_current_l2
+                name: L2 Current
+              - entity: sensor.alfen_current_l3
+                name: L3 Current
+
           - type: entities
-            title: Voltages
+            title: Phase Voltages (V)
             entities:
-              - sensor.alfen_voltage_l1n
-              - sensor.alfen_voltage_l2n
-              - sensor.alfen_voltage_l3n
+              - entity: sensor.alfen_voltage_l1n
+                name: L1-N Voltage
+              - entity: sensor.alfen_voltage_l2n
+                name: L2-N Voltage
+              - entity: sensor.alfen_voltage_l3n
+                name: L3-N Voltage
+
           - type: entities
-            title: Delivered Energy & Quality
+            title: Hardware Information
             entities:
-              - entity: sensor.alfen_energy_consumed_total_kwh
-                name: Total Energy Consumed (kWh)
-              - sensor.alfen_frequency
-              - sensor.alfen_pf_sum
-          - type: entities
-            title: Device Info
-            entities:
-              - sensor.alfen_name
-              - sensor.alfen_firmware_version
-              - sensor.alfen_platform_type
-              - sensor.alfen_station_serial
-              - sensor.alfen_station_active_max_current
-              - sensor.alfen_uptime
+              - entity: sensor.alfen_name
+                name: Name
+              - entity: sensor.alfen_firmware_version
+                name: Firmware Version
+              - entity: sensor.alfen_platform_type
+                name: Platform
+              - entity: sensor.alfen_station_serial
+                name: Serial Number
+              - entity: sensor.alfen_station_active_max_current
+                name: Hardware Limit
+              - entity: sensor.alfen_uptime
+                name: Uptime
