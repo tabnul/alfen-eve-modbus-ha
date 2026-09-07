@@ -17,11 +17,12 @@ Charging follows one of three modes selected from a dropdown.
   Start, stop and phase changes each wait out a configurable hold, and phase switches are
   further capped by a cooldown, so it stays calm on a cloudy day.
 - **Fast** — 3-phase at maximum current (clamped by the car max and the fuse guard).
-  Ignores surplus — will import from grid.
+  Ignores surplus — will import from grid. Recoveries use a dedicated, configurable buffer loop.
 - **Off** — pauses the car.
 - **Per-phase fuse protection** — an always-on guard that keeps every phase under your
-  fuse rating by *adjusting* the charge current down when a phase is loaded and back up
-  when it clears, in any mode. It only pauses if even the 6 A floor won't fit.
+  fuse rating by *adjusting* the charge current down when a phase is loaded and letting recovery
+  loops handle stepping power back up. It includes configurable telemetry settle-filtering
+  and optional 6 A hard-floor protection to eliminate false triggers and charge session restarts.
 - **Survives restarts** — the selected mode and all tuning values persist across an HA
   restart. Fast re-applies on boot; Solar picks back up on the next control tick.
 - Full metering, status and control surfaced as HA entities, plus a dashboard.
@@ -170,23 +171,31 @@ once surplus holds above `alfen_phase_up_threshold` for the phase hold, and drop
 full stop resets to 1-phase so a paused charger never sits on 3-phase.
 
 **Anti-oscillation.** Configurable holds on start/stop (`alfen_solar_hold`) and on phase
-switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); and the
-1 A modulate deadband. Together these keep it from thrashing on a flickering cloudy day.
+switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); asymmetric
+step buffers (`alfen_step_buffer_down` / `alfen_step_buffer_up`); and the 1 A modulate deadband.
+Together these keep it from thrashing on a flickering cloudy day or bouncing on household loads.
 
 ## Fuse protection
 
 The charger's own load balancing is off (pure EMS), so keeping the main fuse safe is HA's
-job. It's a **soft** limit — reactive at the guard cadence, not a substitute for the
+job. It's a **soft** limit — reactive at the 20 s guard cadence, not a substitute for the
 physical breaker — but it prevents nuisance trips in normal operation, and rather than
 cutting the car off it **adjusts** the current to fit.
 
 - **Per-phase headroom** (`alfen_headroom_l1/l2/l3`) = fuse rating − other house load on
   that phase. `alfen_headroom_active` governs the current mode: L1 in 1-phase, tightest of
   the three in 3-phase.
-- **Fuse guard** (`alfen_fuse_guard`, every 5 s, **all modes**) keeps every phase under
-  `alfen_fuse_per_phase`. In Fast it trims the car down when a phase is loaded and back up
-  to max when it clears; in Solar the modulate loop already clamps to headroom, so the
-  guard there just pauses if even the 6 A floor won't fit. A deadband stops it churning.
+- **Fuse guard** (`alfen_fuse_guard`, every 20 s, **all modes**) keeps every phase under
+  `alfen_fuse_per_phase`. When household appliances turn on, it steps the target current down.
+- **Telemetry Settle Filter** (`alfen_guard_settle_time`): Requires headroom to remain below
+  target for a configurable duration (default 5 s, max 20 s) before executing a step-down.
+  This ignores phantom headroom collapses caused by P1 meter polling lag when the car renegotiates power.
+- **Asymmetric Step Buffers** (`alfen_step_buffer_down` / `alfen_step_buffer_up`): Decouples
+  downward safety stepping (fast/sensitive, e.g., 1 A) from upward recovery stepping
+  (cautious/buffered, e.g., 3 A) to stop setpoint hunting.
+- **Enforce Hard Floor** (`input_boolean.alfen_enforce_hard_floor`): When enabled, clamps the
+  minimum current calculation strictly at 6 A (the IEC 61851 minimum). This prevents illegal intermediate
+  setpoints (1–5 A) from forcing the charger to drop the Mode 3 state and triggering unexpected charge session restarts.
 
 **Set `alfen_fuse_per_phase` to the total per-phase current you'll allow** (car + other
 household load on that phase), a little below your real fuse — e.g. **24 A under a 25 A
@@ -209,8 +218,8 @@ register is dead on this meter and is not used.)
 
 ## Tunable settings (helpers)
 
-All tuning is via `input_number` / `input_select` helpers — no YAML logic edits. None have
-a fixed `initial:`, so **your values persist across restarts**; each shows a suggested
+All tuning is via `input_number` / `input_select` / `input_boolean` helpers — no YAML logic edits.
+None have a fixed `initial:`, so **your values persist across restarts**; each shows a suggested
 starting value on the dashboard, and the templates fall back to that suggestion if a
 helper is ever left blank.
 
@@ -220,6 +229,10 @@ helper is ever left blank.
 | `alfen_min_current` | The 6 A IEC floor; never charges below this. | 6 A |
 | `alfen_stop_current` | The "off" value written to pause (below 6 A). | 5 A |
 | `alfen_fuse_per_phase` | Total per-phase current cap (car + house). | 24 A |
+| `alfen_step_buffer_down` | Minimum Ampere drop required to trigger a safety step-down. | 1 A |
+| `alfen_step_buffer_up` | Minimum Ampere headroom required before Fast mode ramps back up. | 3 A |
+| `alfen_guard_settle_time` | Seconds low headroom must persist to ignore P1 telemetry drops. | 5 s |
+| `alfen_enforce_hard_floor` | Boolean: locks min setpoint to 6 A to prevent session restarts. | On |
 | `alfen_phase_up_threshold` | Surplus (W) to switch 1→3 phase. | 4800 W |
 | `alfen_phase_down_threshold` | Surplus (W) to switch 3→1 phase. | 4140 W |
 | `alfen_phase_cooldown` | Minutes blocking any further phase switch. | 12 min |
@@ -279,6 +292,18 @@ Do this in order so a failure points at one layer:
   start/stop hold before charging begins (and below it before stopping), and above the
   phase-up threshold for the phase hold before going 3-phase. On a marginal day it pauses
   more and switches less; that's the trade-off for not thrashing. All holds are tunable.
+- **DSMR4 vs. DSMR5 Smart Meter Polling Frequency:** The `alfen_fuse_guard` automation defaults
+  to a 20-second evaluation tick (`seconds: "/20"`), which works reliably for DSMR4 meters
+  (10-second updates). If you have a DSMR5 smart meter (1-second updates) and want the fuse
+  guard to react faster to heavy household loads, open `packages/alfen.yaml` and adjust the
+  trigger interval in `alfen_fuse_guard`:
+  ```yaml
+  triggers:
+    - trigger: time_pattern
+      seconds: "/5"  # Faster evaluation for DSMR5 1-second updates (or "/2", "/10")
+  ```
+  When lowering this interval, set **Fuse guard settle time** (`alfen_guard_settle_time`)
+  on the dashboard to `2 s`–`3 s` to keep filtering out transient telemetry drops during EV current renegotiations.
 - **After an HA restart**, the selected mode and all tuning values are restored (no helper
   has a fixed `initial:`, so HA restores the last value). Fast re-applies on boot; Solar
   resumes on the next 20 s control tick if there's surplus. *On the very first reload after
@@ -294,7 +319,7 @@ Do this in order so a failure points at one layer:
   to at most one per `alfen_phase_cooldown` in either direction.
 - **2 Modbus TCP connections max** — if EVCC or another master is still connected, HA's
   writes can be refused for lack of a slot. Run only HA against the charger.
-- **Fuse protection is soft** — reactive at the 5 s guard cadence, and it fails *open*
+- **Fuse protection is soft** — reactive at the 20 s guard cadence, and it fails *open*
   (does nothing) if P1 data is missing. It reduces nuisance trips; it is not the breaker.
 - **The car is a second controller.** Some EVs refuse to charge at low currents, drop the
   pilot (Mode 3 → B1/E/F), or won't hold 3-phase without enough power — behaviour that can

@@ -74,6 +74,32 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: min
+  alfen_step_buffer_down:
+    name: Alfen Step Down Buffer (Safety)
+    min: 1
+    max: 5
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_step_buffer_up:
+    name: Alfen Step Up Buffer (Recovery)
+    min: 1
+    max: 5
+    step: 1
+    mode: box
+    unit_of_measurement: A
+  alfen_guard_settle_time:
+    name: Alfen Fuse Guard Settle Time
+    min: 1
+    max: 20
+    step: 1
+    mode: box
+    unit_of_measurement: s
+
+input_boolean:
+  alfen_enforce_hard_floor:
+    name: Alfen Enforce Hard Floor (Prevent Pause)
+    icon: mdi:shield-lock
 
 input_datetime:
   alfen_last_phase_switch:
@@ -298,18 +324,13 @@ automation:
         data:
           amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
 
-  # --- Always-on fuse protection (separate, 5s cadence) ---
-  # --- Fuse guard (every 5s, all modes): keep every phase under the fuse by
-  #     ADJUSTING the charge current, not cutting it. In Fast it trims down when a
-  #     phase gets tight and recovers back up to max when it clears. In Solar the
-  #     modulate loop already clamps to headroom, so here the guard is protective
-  #     only (pause if even the 6 A floor won't fit). Deadband avoids churn. ---
+  # --- Fuse protection (Safety Down) ---
   - id: alfen_fuse_guard
     alias: Alfen fuse guard
     mode: restart
     triggers:
       - trigger: time_pattern
-        seconds: "/5"
+        seconds: "/20"
     conditions:
       - condition: template
         value_template: >
@@ -318,39 +339,70 @@ automation:
       - condition: template
         value_template: >
           {{ states('sensor.alfen_headroom_active') not in ['unknown','unavailable'] }}
+      - condition: template
+        value_template: >
+          {% set head = states('sensor.alfen_headroom_active') | float(99) %}
+          {% set cur = states('input_number.alfen_target_current') | float(0) %}
+          {% set settle = states('input_number.alfen_guard_settle_time') | float(5) %}
+          {% set last_change = as_timestamp(states.sensor.alfen_headroom_active.last_changed) | float(0) %}
+          {{ head < cur and (now().timestamp() - last_change) >= settle }}
     actions:
       - variables:
           minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
           head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
           cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
+          buf_down: "{{ states('input_number.alfen_step_buffer_down') | float(1) }}"
+          hard_floor: "{{ is_state('input_boolean.alfen_enforce_hard_floor', 'on') }}"
+          new_target: "{{ [ (head | int(0)), (minc | int(6)) ] | max }}"
       - choose:
-          # Headroom below the 6 A floor -> can't fit; pause (any mode).
+          # Case 1: Headroom dropped below floor, AND hard floor is DISABLED -> pause charging
           - conditions:
               - condition: template
-                value_template: "{{ head | float < minc | float }}"
-              - condition: template
-                value_template: "{{ cur | float >= minc | float }}"
+                value_template: "{{ not hard_floor and head < minc and cur >= minc }}"
             sequence:
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
-          # Fast: hold current at the highest safe value up to max (auto down/up).
+
+          # Case 2: Real drop needing >= step buffer reduction -> step down smoothly
           - conditions:
-              - condition: state
-                entity_id: input_select.alfen_charge_mode
-                state: "Fast"
-            sequence:
-              - variables:
-                  ceiling: "{{ states('input_number.alfen_max_current') | float(16) }}"
-                  newt: "{{ [ [ head | float, minc | float ] | max, ceiling | float ] | min | round(0) }}"
               - condition: template
-                value_template: "{{ (newt | float - cur | float) | abs >= 1 }}"
+                value_template: "{{ head < cur and cur > minc }}"
+              - condition: template
+                value_template: "{{ (cur - new_target) >= buf_down }}"
+            sequence:
               - service: script.alfen_set_current
                 data:
-                  amps: "{{ newt }}"
-        # Solar (and anything else) with headroom >= min: leave it to the modulate
-        # loop, which already clamps to headroom and recovers. Nothing to do.
+                  amps: "{{ new_target }}"
         default: []
+
+  # --- Fast Mode Recovery Loop (Recovery Up) ---
+  - id: alfen_fast_mode_recovery
+    alias: Alfen Fast mode recovery
+    mode: restart
+    triggers:
+      - trigger: time_pattern
+        seconds: "/20"
+    conditions:
+      - condition: state
+        entity_id: input_select.alfen_charge_mode
+        state: "Fast"
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3_state')
+             not in ['A','E','F','unknown','unavailable'] }}
+    actions:
+      - variables:
+          maxc: "{{ states('input_number.alfen_max_current') | float(16) }}"
+          cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
+          head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
+          buf_up: "{{ states('input_number.alfen_step_buffer_up') | float(3) }}"
+          target_possible: "{{ [ (head | int(0)), (maxc | int(16)) ] | min }}"
+      - condition: template
+        value_template: "{{ (target_possible - cur) >= buf_up }}"
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ target_possible }}"
 
   # --- Mode routing: Off / disconnect -> pause; Fast -> 3p max. ---
   - id: alfen_charge_mode_apply

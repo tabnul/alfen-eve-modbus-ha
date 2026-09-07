@@ -31,6 +31,14 @@ views:
                 name: Stop current — suggest 5
               - entity: input_number.alfen_fuse_per_phase
                 name: Fuse per phase — suggest 24
+              - entity: input_number.alfen_step_buffer_down
+                name: Step down buffer (safety) — suggest 1
+              - entity: input_number.alfen_step_buffer_up
+                name: Step up buffer (recovery) — suggest 3
+              - entity: input_number.alfen_guard_settle_time
+                name: Fuse guard settle time — suggest 5
+              - entity: input_boolean.alfen_enforce_hard_floor
+                name: Enforce 6A hard floor (prevent restarts)
               - entity: input_select.alfen_price_fallback
                 name: Price fallback
           - type: entities
@@ -201,8 +209,6 @@ views:
               when the load clears.
           - type: markdown
             content: >
-          - type: markdown
-            content: >
               ## Solar tuning
 
 
@@ -255,3 +261,22 @@ views:
               P1 meter and trims the car's current to keep every phase under this,
               recovering when load clears. Set it just below your real fuse rating
               (e.g. 24 A under a 25 A fuse). Only pauses if even 6 A won't fit.
+
+
+              **Step down buffer (safety)** — minimum Ampere drop required before
+              stepping current down (default 1 A). Controls how fast safety kicks in.
+
+
+              **Step up buffer (recovery)** — minimum Ampere recovery required before
+              stepping current back up (default 3 A). Prevents setpoint hunting.
+
+
+              **Fuse guard settle time** — duration in seconds that headroom must
+              remain low before Fuse Guard steps down (default 5 s, max 20 s). Ignores
+              short telemetry drops caused by P1 meter and Modbus desynchronization.
+
+
+              **Enforce 6A hard floor** — when enabled, target current will never drop
+              below 6 A (IEC minimum). Prevents intermediate setpoints (1–5 A) from
+              dropping the Mode 3 state and triggering session restarts during P1/Modbus
+              telemetry drops.
