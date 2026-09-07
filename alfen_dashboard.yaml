@@ -37,6 +37,8 @@ views:
                 name: Step up buffer (recovery) — suggest 3
               - entity: input_number.alfen_guard_settle_time
                 name: Fuse guard settle time — suggest 5
+              - entity: input_number.alfen_stop_cooldown
+                name: Post-stop recovery cooldown — suggest 5
               - entity: input_boolean.alfen_enforce_hard_floor
                 name: Enforce 6A hard floor (prevent restarts)
               - entity: input_select.alfen_price_fallback
@@ -56,6 +58,8 @@ views:
                 name: Phase switch hold — suggest 3
               - entity: input_datetime.alfen_last_phase_switch
                 name: Last phase switch
+              - entity: input_datetime.alfen_last_stop
+                name: Last charging stop
           - type: button
             name: Force 1-phase
             icon: mdi:numeric-1-circle-outline
@@ -206,7 +210,7 @@ views:
               **Fast** — 3-phase at maximum current (clamped by the phase and fuse
               limits). Ignores surplus — will import from grid. If a phase nears
               the fuse limit it trims the current down, then recovers back to max
-              when the load clears.
+              when the load clears (subject to the post-stop recovery cooldown if forced to pause).
           - type: markdown
             content: >
               ## Solar tuning
@@ -274,6 +278,10 @@ views:
               **Fuse guard settle time** — duration in seconds that headroom must
               remain low before Fuse Guard steps down (default 5 s, max 20 s). Ignores
               short telemetry drops caused by P1 meter and Modbus desynchronization.
+
+
+              **Post-stop recovery cooldown** — duration in minutes that Fast mode
+              recovery must wait before restarting charging after a stop (default 5 min).
 
 
               **Enforce 6A hard floor** — when enabled, target current will never drop

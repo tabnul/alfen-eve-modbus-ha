@@ -17,7 +17,8 @@ Charging follows one of three modes selected from a dropdown.
   Start, stop and phase changes each wait out a configurable hold, and phase switches are
   further capped by a cooldown, so it stays calm on a cloudy day.
 - **Fast** — 3-phase at maximum current (clamped by the car max and the fuse guard).
-  Ignores surplus — will import from grid. Recoveries use a dedicated, configurable buffer loop.
+  Ignores surplus — will import from grid. Recoveries use a dedicated, configurable buffer loop
+  gated by a post-stop recovery cooldown (`input_number.alfen_stop_cooldown`).
 - **Off** — pauses the car.
 - **Per-phase fuse protection** — an always-on guard that keeps every phase under your
   fuse rating by *adjusting* the charge current down when a phase is loaded and letting recovery
@@ -138,7 +139,8 @@ never writes current or phases directly, so it can't fight the engine.
 **Setpoint.** All current control is a single float32 write to register **1210** (the
 "Modbus Slave Max Current" setpoint). The `alfen_set_current` script packs the amps into
 two 16-bit words (big-endian IEEE-754, single multi-register write, as the charger
-requires) and records the value into `input_number.alfen_target_current`.
+requires) and records the value into `input_number.alfen_target_current`. Any write below min current
+automatically timestamps `input_datetime.alfen_last_stop`.
 
 **Keep-alive.** The setpoint falls back to Safe current if it isn't refreshed within the
 configured validity time (set to 300 s — see charger config). `alfen_setpoint_renew`
@@ -171,9 +173,9 @@ once surplus holds above `alfen_phase_up_threshold` for the phase hold, and drop
 full stop resets to 1-phase so a paused charger never sits on 3-phase.
 
 **Anti-oscillation.** Configurable holds on start/stop (`alfen_solar_hold`) and on phase
-switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); asymmetric
-step buffers (`alfen_step_buffer_down` / `alfen_step_buffer_up`); and the 1 A modulate deadband.
-Together these keep it from thrashing on a flickering cloudy day or bouncing on household loads.
+switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); a configurable
+post-stop recovery cooldown (`input_number.alfen_stop_cooldown`); asymmetric step buffers (`alfen_step_buffer_down` / `alfen_step_buffer_up`);
+and the 1 A modulate deadband. Together these keep it from thrashing on a flickering cloudy day or bouncing on household loads.
 
 ## Fuse protection
 
@@ -232,6 +234,7 @@ helper is ever left blank.
 | `alfen_step_buffer_down` | Minimum Ampere drop required to trigger a safety step-down. | 1 A |
 | `alfen_step_buffer_up` | Minimum Ampere headroom required before Fast mode ramps back up. | 3 A |
 | `alfen_guard_settle_time` | Seconds low headroom must persist to ignore P1 telemetry drops. | 5 s |
+| `alfen_stop_cooldown` | Minutes Fast mode recovery must wait after a stop before restarting. | 5 min |
 | `alfen_enforce_hard_floor` | Boolean: locks min setpoint to 6 A to prevent session restarts. | On |
 | `alfen_phase_up_threshold` | Surplus (W) to switch 1→3 phase. | 4800 W |
 | `alfen_phase_down_threshold` | Surplus (W) to switch 3→1 phase. | 4140 W |

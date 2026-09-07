@@ -60,6 +60,13 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: min
+  alfen_stop_cooldown:
+    name: Alfen post-stop recovery cooldown
+    min: 0
+    max: 15
+    step: 1
+    mode: box
+    unit_of_measurement: min
   alfen_solar_hold:
     name: Alfen solar start/stop hold
     min: 0
@@ -104,6 +111,10 @@ input_boolean:
 input_datetime:
   alfen_last_phase_switch:
     name: Alfen last phase switch
+    has_date: true
+    has_time: true
+  alfen_last_stop:
+    name: Alfen last charging stop
     has_date: true
     has_time: true
 
@@ -247,6 +258,15 @@ script:
           entity_id: input_number.alfen_target_current
         data:
           value: "{{ amps | float(0) }}"
+      - if:
+          - condition: template
+            value_template: "{{ amps | float(0) < states('input_number.alfen_min_current') | float(6) }}"
+        then:
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.alfen_last_stop
+            data:
+              timestamp: "{{ now().timestamp() }}"
       - variables:
           words: >
             {% set v = amps | float(0) %}
@@ -391,6 +411,13 @@ automation:
         value_template: >
           {{ states('sensor.alfen_mode3_state')
              not in ['A','E','F','unknown','unavailable'] }}
+      # Configurable post-stop recovery cooldown using Unix timestamp math
+      - condition: template
+        value_template: >
+          {% set dt = 'input_datetime.alfen_last_stop' %}
+          {% set last_stop = as_timestamp(states(dt)) if has_value(dt) else 0 %}
+          {% set cd = states('input_number.alfen_stop_cooldown') | float(5) * 60 %}
+          {{ (now().timestamp() - last_stop) >= cd }}
     actions:
       - variables:
           maxc: "{{ states('input_number.alfen_max_current') | float(16) }}"
@@ -496,10 +523,10 @@ automation:
                and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_surplus_under_down.last_changed))
                    >= states('input_number.alfen_phase_hold') | float(3) * 60 }}
           cooldown_ok: >
-            {% set last = state_attr('input_datetime.alfen_last_phase_switch','timestamp') %}
+            {% set dt = 'input_datetime.alfen_last_phase_switch' %}
+            {% set last_switch = as_timestamp(states(dt)) if has_value(dt) else 0 %}
             {% set cd = states('input_number.alfen_phase_cooldown') | float(12) * 60 %}
-            {{ true if last is none
-               else (now().timestamp() - (last | float(0))) > cd }}
+            {{ (now().timestamp() - last_switch) >= cd }}
           newt: >
             {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
             {% set ph = states('sensor.alfen_phases') | int(1) %}
