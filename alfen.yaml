@@ -107,6 +107,9 @@ input_boolean:
   alfen_enforce_hard_floor:
     name: Alfen Enforce Hard Floor (Prevent Pause)
     icon: mdi:shield-lock
+  alfen_dashboard_show_help:
+    name: Show Dashboard Explanations
+    icon: mdi:help-circle-outline
 
 input_datetime:
   alfen_last_phase_switch:
