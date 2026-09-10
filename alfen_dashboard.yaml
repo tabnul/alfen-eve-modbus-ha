@@ -46,8 +46,16 @@ views:
                 name: Start/stop hold — suggest 3
               - entity: input_number.alfen_phase_hold
                 name: Phase switch hold — suggest 3
+              - entity: input_number.alfen_stop_cooldown
+                name: Post-stop recovery cooldown — suggest 3
+              - entity: input_number.alfen_step_down_buffer
+                name: Step-down buffer (re-negotiation) — suggest 2
+              - entity: input_number.alfen_critical_timeout
+                name: Sustained overload timeout — suggest 60
               - entity: input_datetime.alfen_last_phase_switch
                 name: Last phase switch
+              - entity: input_datetime.alfen_last_guard_stop
+                name: Last fuse-guard stop
           - type: button
             name: Force 1-phase
             icon: mdi:numeric-1-circle-outline
@@ -254,4 +262,28 @@ views:
               household devices). The fuse guard reads each phase's total from the
               P1 meter and trims the car's current to keep every phase under this,
               recovering when load clears. Set it just below your real fuse rating
-              (e.g. 24 A under a 25 A fuse). Only pauses if even 6 A won't fit.
+              (e.g. 24 A under a 25 A fuse).
+
+
+              ## Fuse guard tuning
+
+
+              **Step-down buffer** — minimum current reduction (A) before the guard
+              actually writes. Going DOWN triggers a car re-negotiation (IEC 61851),
+              so small dips are tolerated rather than chased. Higher = fewer
+              re-negotiations but looser tracking. Default 2 A.
+
+
+              **Post-stop recovery cooldown** — after ANY guard intervention (trim
+              or stop), the system waits this long before ramping back up. Prevents
+              up→down→up oscillation on a cloudy day where each down triggers an
+              expensive re-negotiation. Going UP is free (no re-negotiation), but
+              climbing up only to trim down again 30s later wastes two
+              re-negotiations. Default 3 min.
+
+
+              **Sustained overload timeout** — how long headroom must stay critically
+              low (below the 6 A floor) before the guard actually stops charging.
+              Brief dips (passing clouds) are ridden through at the 6 A floor;
+              only a SUSTAINED overload beyond this timeout triggers a full stop.
+              Default 60 s.
