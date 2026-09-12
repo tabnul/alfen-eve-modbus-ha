@@ -452,6 +452,14 @@ automation:
               - condition: state
                 entity_id: input_select.alfen_charge_mode
                 state: "Fast"
+              # Only re-assert Fast on a DELIBERATE mode selection or HA start,
+              # not on mode3 state flickers during charging (which would bypass
+              # the fuse guard's trim-down and recovery cooldown).
+              - condition: template
+                value_template: >
+                  {{ trigger.platform == 'homeassistant'
+                     or (trigger.platform == 'state'
+                         and trigger.entity_id == 'input_select.alfen_charge_mode') }}
             sequence:
               - if:
                   - condition: template
