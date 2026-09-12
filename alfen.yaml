@@ -88,11 +88,32 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
+  alfen_step_up_buffer:
+    name: Alfen step-up buffer
+    min: 1
+    max: 5
+    step: 1
+    mode: box
+    unit_of_measurement: A
   alfen_critical_timeout:
     name: Alfen sustained overload timeout
     min: 20
     max: 300
     step: 10
+    mode: box
+    unit_of_measurement: s
+  alfen_guard_down_settle:
+    name: Alfen scale-down settle time
+    min: 0
+    max: 120
+    step: 5
+    mode: box
+    unit_of_measurement: s
+  alfen_guard_up_settle:
+    name: Alfen scale-up settle time
+    min: 0
+    max: 300
+    step: 5
     mode: box
     unit_of_measurement: s
 
@@ -119,6 +140,11 @@ input_select:
       - "Off"
       - "Solar"
 
+input_boolean:
+  alfen_dashboard_show_help:
+    name: Show EV Charger Help
+    icon: mdi:help-circle-outline
+
 template:
   - binary_sensor:
       # Surplus threshold flags. last_changed lets the control loop measure how long
@@ -143,6 +169,21 @@ template:
         state: >
           {{ states('sensor.alfen_headroom_active') | float(99)
              < states('input_number.alfen_min_current') | float(6) }}
+      - name: alfen_guard_should_trim
+        unique_id: alfen_guard_should_trim
+        state: >
+          {% set head = states('sensor.alfen_headroom_active') | float(99) %}
+          {% set cur = states('input_number.alfen_target_current') | float(0) %}
+          {% set buf = states('input_number.alfen_step_down_buffer') | float(2) %}
+          {{ head < (cur - buf) and cur >= states('input_number.alfen_min_current') | float(6) }}
+      - name: alfen_guard_can_recover
+        unique_id: alfen_guard_can_recover
+        state: >
+          {% set head = states('sensor.alfen_headroom_active') | float(0) %}
+          {% set cur = states('input_number.alfen_target_current') | float(0) %}
+          {% set maxc = states('input_number.alfen_max_current') | float(16) %}
+          {% set buf = states('input_number.alfen_step_up_buffer') | float(2) %}
+          {{ head >= (cur + buf) and cur < maxc }}
 
   - sensor:
       # Human-readable Mode 3 (IEC 61851) label for the dashboard. Display only —
@@ -372,11 +413,25 @@ automation:
           # Safe target: clamp headroom to [min, max], rounded.
           safe: "{{ [ [ head | float, minc | float ] | max, maxc | float ] | min | round(0) }}"
           # Asymmetric deadband: going DOWN triggers car re-negotiation (expensive),
-          # going UP doesn't. So only trim down for significant changes.
+          # going UP doesn't. So only trim down for significant, sustained changes.
           buf_down: "{{ states('input_number.alfen_step_down_buffer') | float(2) }}"
+          buf_up: "{{ states('input_number.alfen_step_up_buffer') | float(2) }}"
+          # Scale-down settle: has the trim condition been true long enough?
+          # Uses binary_sensor.alfen_guard_should_trim whose last_changed only
+          # resets when the CONDITION crosses (not on every headroom update).
+          down_settled: >
+            {% set settle = states('input_number.alfen_guard_down_settle') | float(40) %}
+            {{ is_state('binary_sensor.alfen_guard_should_trim','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_guard_should_trim.last_changed))
+                   >= settle }}
+          # Scale-up settle: has headroom been sustainably above recovery threshold?
+          up_settled: >
+            {% set settle = states('input_number.alfen_guard_up_settle') | float(60) %}
+            {{ is_state('binary_sensor.alfen_guard_can_recover','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_guard_can_recover.last_changed))
+                   >= settle }}
       - choose:
-          # 1) Sustained critical headroom (>60s below 6A) — real overload, stop.
-          #    Stamp the stop time for the recovery cooldown.
+          # 1) Sustained critical headroom — real overload, stop.
           - conditions:
               - condition: template
                 value_template: "{{ charging and critical_sustained }}"
@@ -390,16 +445,11 @@ automation:
                 data:
                   timestamp: "{{ now().timestamp() }}"
 
-          # 2) Headroom below current — trim down. Cloud = clamp to 6A floor, not stop.
-          #    Uses the step-down buffer: only write if the reduction >= buf_down,
-          #    because every down-write triggers a car re-negotiation (IEC 61851).
-          #    Small dips are tolerated rather than chased.
-          #    Stamps the recovery timer so the system settles before climbing back up.
+          # 2) Headroom below current, sustained for settle time — trim down.
+          #    Cloud = clamp to 6A floor, not stop.
           - conditions:
               - condition: template
-                value_template: >
-                  {{ charging and head | float < cur | float
-                     and (cur | float - safe | float) >= buf_down | float }}
+                value_template: "{{ charging and down_settled }}"
             sequence:
               - service: script.alfen_set_current
                 data:
@@ -410,14 +460,13 @@ automation:
                 data:
                   timestamp: "{{ now().timestamp() }}"
 
-          # 3) Fast recovery: headroom recovered and stop cooldown elapsed.
-          #    Going UP is free (no re-negotiation), so 1A deadband is fine.
+          # 3) Fast recovery: headroom sustainably recovered (up-settle elapsed),
+          #    AND stop cooldown elapsed. Going UP is free (no re-negotiation).
           - conditions:
               - condition: template
                 value_template: >
-                  {{ mode == 'Fast' and stop_cooldown_ok
-                     and head | float >= minc | float
-                     and (safe | float - cur | float) >= 1 }}
+                  {{ mode == 'Fast' and stop_cooldown_ok and up_settled
+                     and head | float >= minc | float }}
             sequence:
               - service: script.alfen_set_current
                 data:
