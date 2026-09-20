@@ -246,7 +246,12 @@ template:
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l1') | float(0) %}
           {% set house = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car %}
-          {{ (fuse - house) | round(1) }}
+          {#- Clamp at the fuse rating. While exporting, net phase power is
+              negative, so 'house' goes negative and headroom would read well
+              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              while the sun holds, and the car's own draw must fit the fuse on
+              its own. -#}
+          {{ ([ fuse - house, fuse ] | min) | round(1) }}
       - name: alfen_headroom_l2
         unique_id: alfen_headroom_l2
         unit_of_measurement: A
@@ -257,7 +262,12 @@ template:
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l2') | float(0) %}
           {% set house = (states('sensor.p1_meter_power_phase_2') | float(0)) / v - car %}
-          {{ (fuse - house) | round(1) }}
+          {#- Clamp at the fuse rating. While exporting, net phase power is
+              negative, so 'house' goes negative and headroom would read well
+              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              while the sun holds, and the car's own draw must fit the fuse on
+              its own. -#}
+          {{ ([ fuse - house, fuse ] | min) | round(1) }}
       - name: alfen_headroom_l3
         unique_id: alfen_headroom_l3
         unit_of_measurement: A
@@ -268,7 +278,12 @@ template:
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l3') | float(0) %}
           {% set house = (states('sensor.p1_meter_power_phase_3') | float(0)) / v - car %}
-          {{ (fuse - house) | round(1) }}
+          {#- Clamp at the fuse rating. While exporting, net phase power is
+              negative, so 'house' goes negative and headroom would read well
+              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              while the sun holds, and the car's own draw must fit the fuse on
+              its own. -#}
+          {{ ([ fuse - house, fuse ] | min) | round(1) }}
 
       - name: alfen_headroom_active
         unique_id: alfen_headroom_active
@@ -419,6 +434,16 @@ automation:
       - condition: template
         value_template: >
           {{ states('sensor.alfen_headroom_active') not in ['unknown','unavailable'] }}
+      # NEVER write current while a phase switch is running. The switch script
+      # deliberately drops the setpoint to stop_current and holds it there for
+      # 10 s so the contactor changes under no load. Without this condition the
+      # guard sees that low setpoint, decides headroom has recovered, and writes
+      # max current straight back into the middle of the pause -- the phase
+      # register then gets written while the car is drawing full current and the
+      # charger silently refuses to switch.
+      - condition: state
+        entity_id: script.alfen_switch_phases
+        state: "off"
     actions:
       - variables:
           minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
@@ -493,9 +518,10 @@ automation:
                   entity_id: input_boolean.alfen_events
                   message: >-
                     Trim {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
-                    {{ head }} A on the tightest phase, held for
+                    {{ head }} A on the tightest phase, low for at least the
                     {{ states('input_number.alfen_guard_down_settle') | round(0) }} s
-                    (fuse budget {{ states('input_number.alfen_fuse_per_phase') | round(0) }} A/phase).
+                    settle window (fuse budget
+                    {{ states('input_number.alfen_fuse_per_phase') | round(0) }} A/phase).
               - service: script.alfen_set_current
                 data:
                   amps: "{{ safe }}"
@@ -519,29 +545,39 @@ automation:
                   entity_id: input_boolean.alfen_events
                   message: >-
                     Recover {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
-                    {{ head }} A held for
-                    {{ states('input_number.alfen_guard_up_settle') | round(0) }} s
-                    and the {{ states('input_number.alfen_stop_cooldown') | round(0) }} min
-                    cooldown has elapsed.
+                    {{ head }} A, up-settle
+                    ({{ states('input_number.alfen_guard_up_settle') | round(0) }} s)
+                    and cooldown
+                    ({{ states('input_number.alfen_stop_cooldown') | round(0) }} min)
+                    both satisfied.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ safe }}"
         # Solar with headroom >= min: modulate loop handles it. Nothing to do.
         default: []
 
-  # --- Mode routing: Off / disconnect -> pause; Fast -> 3p max. ---
+  # --- Mode routing: deliberate mode selection (or HA start) ONLY.
+  #     Deliberately NOT triggered by sensor.alfen_mode3_state. This automation
+  #     calls alfen_switch_phases, which pauses the car for 10 s -- and that pause
+  #     changes the Mode 3 state (C2 -> B1/B2). With a mode3 trigger plus
+  #     mode: restart, that state change re-triggered this automation, which
+  #     cancelled its own in-flight run. The script is called as a service, so it
+  #     is a child of that run and died at the delay: register 1215 was never
+  #     written and the charger stayed on 1 phase. Solar was unaffected because
+  #     alfen_solar calls the same script and is not triggered by mode3.
+  #     Disconnect handling now lives in its own automation below, which never
+  #     switches phases and is therefore safe to restart.
   - id: alfen_charge_mode_apply
     alias: Alfen charge mode apply
     mode: restart
     triggers:
       - trigger: state
         entity_id: input_select.alfen_charge_mode
-      - trigger: state
-        entity_id: sensor.alfen_mode3_state
       - trigger: homeassistant
         event: start
     actions:
       - choose:
+          # Off, or no car / error state -> pause.
           - conditions:
               - condition: template
                 value_template: >
@@ -552,18 +588,13 @@ automation:
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+          # Fast -> 3-phase at max, clamped by headroom. No trigger-source check
+          # is needed any more: mode3 no longer triggers this automation, so it
+          # can only run on a deliberate selection or on HA start.
           - conditions:
               - condition: state
                 entity_id: input_select.alfen_charge_mode
                 state: "Fast"
-              # Only re-assert Fast on a DELIBERATE mode selection or HA start,
-              # not on mode3 state flickers during charging (which would bypass
-              # the fuse guard's trim-down and recovery cooldown).
-              - condition: template
-                value_template: >
-                  {{ trigger.platform == 'homeassistant'
-                     or (trigger.platform == 'state'
-                         and trigger.entity_id == 'input_select.alfen_charge_mode') }}
             sequence:
               - if:
                   - condition: template
@@ -578,6 +609,40 @@ automation:
                     {{ [ states('input_number.alfen_max_current') | float(16),
                          states('sensor.alfen_headroom_active') | float(99) ] | min }}
         default: []
+
+  # --- Car disconnected or faulted -> pause. Split out of the mode routing so
+  #     that mode3 churn can restart THIS automation freely without ever being
+  #     able to cancel a phase switch. It only writes stop current. ---
+  - id: alfen_disconnect_pause
+    alias: Alfen disconnect pause
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.alfen_mode3_state
+    conditions:
+      - condition: template
+        value_template: >
+          {{ states('sensor.alfen_mode3_state')
+             in ['A','E','F','unknown','unavailable'] }}
+      # Only act if we currently believe we are charging -- otherwise every
+      # mode3 flicker on an empty charger would rewrite the setpoint.
+      - condition: template
+        value_template: >
+          {{ states('input_number.alfen_target_current') | float(0)
+             >= states('input_number.alfen_min_current') | float(6) }}
+    actions:
+      - service: logbook.log
+        data:
+          name: Alfen
+          entity_id: input_boolean.alfen_events
+          message: >-
+            PAUSE — Mode 3 state is {{ states('sensor.alfen_mode3_state') }}
+            (car disconnected or not supplying). Was at
+            {{ states('input_number.alfen_target_current') | round(0) }} A.
+      - service: script.alfen_set_current
+        data:
+          amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
   # --- Unified Solar control loop. Level-triggered on a /20s tick (+ mode change),
   #     so it re-checks conditions every tick and never misses a threshold-crossing
@@ -602,6 +667,13 @@ automation:
         value_template: >
           {{ states('sensor.alfen_mode3_state')
              not in ['A','E','F','unknown','unavailable'] }}
+      # Same guard as the fuse guard above. This loop blocks itself while it
+      # calls the switch script (mode: single), but a switch started elsewhere
+      # -- the dashboard Force buttons, or charge_mode_apply -- would otherwise
+      # let a modulate write land inside the pause window.
+      - condition: state
+        entity_id: script.alfen_switch_phases
+        state: "off"
     actions:
       - variables:
           minc: "{{ states('input_number.alfen_min_current') | float(6) }}"
