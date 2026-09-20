@@ -122,7 +122,9 @@ views:
 
               **Step-down buffer (A)** — minimum reduction before writing a
               lower current. Small dips are tolerated rather than chased.
-              Higher = fewer re-negotiations. Suggested 2 A.
+              Higher = fewer re-negotiations, but this is a SAFETY buffer: the
+              car may sit this many amps above the fuse-per-phase budget, so
+              keep it at 1 A under a 25 A fuse with a 24 A budget. Suggested 1 A.
 
               **Step-up buffer (A)** — minimum headroom above current before
               ramping back up. Prevents recovering too eagerly into marginal
@@ -159,7 +161,7 @@ views:
           - type: entities
             entities:
               - entity: input_number.alfen_step_down_buffer
-                name: Step-down buffer — suggest 2
+                name: Step-down buffer — suggest 1
               - entity: input_number.alfen_step_up_buffer
                 name: Step-up buffer — suggest 2
               - entity: input_number.alfen_guard_down_settle
@@ -198,8 +200,19 @@ views:
               1↔3 switch. Separate from start/stop so phase changes can be more
               conservative. Suggested 3 min.
 
+              **Solar step-down buffer** — how far the surplus target must fall
+              below the commanded current before Solar writes a lower value.
+              Lowering the current makes the car re-negotiate, so this damps the
+              constant down-writes that passing clouds would otherwise cause.
+              Raising the current is free and still happens on 1 A. Suggested
+              2 A (≈ halves the writes on a cloudy hour, at ~100 W average grid
+              import). 3 A is calmer still but imports ~250 W. Safety is not
+              affected: when the **fuse headroom** is what caps the target, the
+              buffer drops to 1 A automatically and the fuse guard trims as
+              usual.
+
               *After changing a hold value, reload automations for it to take
-              effect. Thresholds and cooldown apply immediately.*
+              effect. Thresholds, buffers and cooldown apply immediately.*
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -217,6 +230,8 @@ views:
                 name: Start/stop hold — suggest 3
               - entity: input_number.alfen_phase_hold
                 name: Phase switch hold — suggest 3
+              - entity: input_number.alfen_solar_step_down_buffer
+                name: Solar step-down buffer — suggest 2
               - entity: input_datetime.alfen_last_phase_switch
                 name: Last phase switch
 
@@ -296,6 +311,43 @@ views:
                 name: Headroom L3 (A)
               - entity: input_number.alfen_fuse_per_phase
                 name: Fuse per phase (total cap)
+
+          - type: heading
+            heading: Safety Event Log
+
+          - type: markdown
+            content: >-
+              <ha-alert alert-type="info">What gets logged</ha-alert>
+
+              Only events that change what the car is allowed to draw, and only
+              the ones you can't reconstruct from the charts afterwards:
+
+              **Fuse guard** — every trim down, every recovery up, and any
+              sustained-overload stop, with the headroom reading that caused it.
+
+              **Solar** — start, stop, and pause when the fuse headroom drops
+              below the 6 A floor.
+
+              **Phase switches** — every 1↔3 change, including the manual
+              buttons above.
+
+              Routine surplus tracking is **not** logged. On a broken-cloud day
+              that is tens of setpoint writes an hour and would bury everything
+              else. Watch *Commanded current* in the chart for that.
+            visibility:
+              - condition: state
+                entity: input_boolean.alfen_dashboard_show_help
+                state: "on"
+
+          - type: logbook
+            grid_options:
+              columns: full
+            hours_to_show: 48
+            # HA 2023.9+ syntax. On older cores replace `target:` with:
+            #   entities: [input_boolean.alfen_events]
+            target:
+              entity_id:
+                - input_boolean.alfen_events
 
           - type: custom:apexcharts-card
             grid_options:

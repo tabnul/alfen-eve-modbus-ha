@@ -1,7 +1,8 @@
 # packages/alfen.yaml — generic control engine. No site-specific price wiring.
-# REDESIGN: minimal-write Solar (anti-flap). Always start 1-phase; switch up only
-# on sustained 3-phase surplus. No entry force-stop, no tick-start, no availability
-# guard. Fast / Manual / Off / keep-alive / fuse guard unchanged from the working base.
+# Modes: Off / Solar / Fast. Solar always starts 1-phase and switches up only on
+# sustained 3-phase surplus. Both the fuse guard and the Solar modulate loop use an
+# ASYMMETRIC deadband: writing a LOWER current makes the car re-negotiate (IEC 61851),
+# writing a HIGHER one does not, so down-writes are buffered and up-writes are not.
 
 input_number:
   alfen_target_current:
@@ -95,6 +96,16 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
+  # Solar-only down-step deadband. Separate from the fuse-guard buffer because
+  # that one is a SAFETY buffer (kept small, 1 A) while this one is purely an
+  # anti-churn buffer for cloud-driven surplus wobble (can be larger).
+  alfen_solar_step_down_buffer:
+    name: Alfen solar step-down buffer
+    min: 1
+    max: 6
+    step: 1
+    mode: box
+    unit_of_measurement: A
   alfen_critical_timeout:
     name: Alfen sustained overload timeout
     min: 20
@@ -144,6 +155,13 @@ input_boolean:
   alfen_dashboard_show_help:
     name: Show EV Charger Help
     icon: mdi:help-circle-outline
+  # Logbook anchor ONLY. Never toggled by anything. Every logbook.log call in
+  # this package attaches its entry to this entity, so the dashboard's logbook
+  # card can show exactly the engine's safety events and nothing else -- routine
+  # state changes on alfen_target_current never land here.
+  alfen_events:
+    name: Alfen events
+    icon: mdi:shield-car
 
 template:
   - binary_sensor:
@@ -174,7 +192,7 @@ template:
         state: >
           {% set head = states('sensor.alfen_headroom_active') | float(99) %}
           {% set cur = states('input_number.alfen_target_current') | float(0) %}
-          {% set buf = states('input_number.alfen_step_down_buffer') | float(2) %}
+          {% set buf = states('input_number.alfen_step_down_buffer') | float(1) %}
           {{ head < (cur - buf) and cur >= states('input_number.alfen_min_current') | float(6) }}
       - name: alfen_guard_can_recover
         unique_id: alfen_guard_can_recover
@@ -334,6 +352,16 @@ script:
         description: 1 or 3
     mode: single
     sequence:
+      # Logged here rather than at the call sites so manual dashboard button
+      # presses are captured too. Every switch costs ~15 s of charging.
+      - service: logbook.log
+        data:
+          name: Alfen phases
+          entity_id: input_boolean.alfen_events
+          message: >-
+            Switch {{ states('sensor.alfen_phases') }} → {{ phases }}-phase
+            (surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W).
+            Pause, switch, resume at minimum — ~15 s charging gap.
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -414,7 +442,7 @@ automation:
           safe: "{{ [ [ head | float, minc | float ] | max, maxc | float ] | min | round(0) }}"
           # Asymmetric deadband: going DOWN triggers car re-negotiation (expensive),
           # going UP doesn't. So only trim down for significant, sustained changes.
-          buf_down: "{{ states('input_number.alfen_step_down_buffer') | float(2) }}"
+          buf_down: "{{ states('input_number.alfen_step_down_buffer') | float(1) }}"
           buf_up: "{{ states('input_number.alfen_step_up_buffer') | float(2) }}"
           # Scale-down settle: has the trim condition been true long enough?
           # Uses binary_sensor.alfen_guard_should_trim whose last_changed only
@@ -436,6 +464,14 @@ automation:
               - condition: template
                 value_template: "{{ charging and critical_sustained }}"
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen fuse guard
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    STOP — headroom {{ head }} A stayed under the {{ minc | round(0) }} A
+                    floor for {{ states('input_number.alfen_critical_timeout') | round(0) }} s
+                    (sustained overload, not a cloud). Was charging at {{ cur | round(0) }} A.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -451,6 +487,15 @@ automation:
               - condition: template
                 value_template: "{{ charging and down_settled }}"
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen fuse guard
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    Trim {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
+                    {{ head }} A on the tightest phase, held for
+                    {{ states('input_number.alfen_guard_down_settle') | round(0) }} s
+                    (fuse budget {{ states('input_number.alfen_fuse_per_phase') | round(0) }} A/phase).
               - service: script.alfen_set_current
                 data:
                   amps: "{{ safe }}"
@@ -468,6 +513,16 @@ automation:
                   {{ mode == 'Fast' and stop_cooldown_ok and up_settled
                      and head | float >= minc | float }}
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen fuse guard
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    Recover {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
+                    {{ head }} A held for
+                    {{ states('input_number.alfen_guard_up_settle') | round(0) }} s
+                    and the {{ states('input_number.alfen_stop_cooldown') | round(0) }} min
+                    cooldown has elapsed.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ safe }}"
@@ -578,6 +633,26 @@ automation:
             {% set cd = states('input_number.alfen_phase_cooldown') | float(12) * 60 %}
             {{ true if last is none
                else (now().timestamp() - (last | float(0))) > cd }}
+          # Deadband a DOWN-write must clear (see branch 6). Normally the Solar
+          # anti-churn buffer, but 1 A when the FUSE HEADROOM is what is capping
+          # the target -- a safety-driven drop is never damped. Resolved to a
+          # number inside one template so no boolean round-trips through HA.
+          # What is actually capping the target right now: the fuse headroom, or
+          # the available surplus? A string, not a bool, so it can be compared by
+          # equality without depending on HA's native-type rendering.
+          cap_reason: >
+            {% set ph = states('sensor.alfen_phases') | int(1) %}
+            {% set ph = ph if ph in [1,3] else 1 %}
+            {% set surplus_amps = (states('sensor.alfen_solar_surplus') | float(0)) / (ph * 230) %}
+            {% set maxc = states('input_number.alfen_max_current') | float(16) %}
+            {% set head = states('sensor.alfen_headroom_active') | float(99) %}
+            {{ 'fuse' if head < ([ surplus_amps, maxc ] | min) else 'surplus' }}
+          down_gate: >
+            {% if cap_reason == 'fuse' %}
+            {{ 1 }}
+            {% else %}
+            {{ states('input_number.alfen_solar_step_down_buffer') | float(2) }}
+            {% endif %}
           newt: >
             {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
             {% set ph = states('sensor.alfen_phases') | int(1) %}
@@ -596,6 +671,14 @@ automation:
               - condition: template
                 value_template: "{{ not charging and start_held }}"
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen solar
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    Start — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
+                    held above the start threshold for
+                    {{ states('input_number.alfen_solar_hold') | round(0) }} min.
               - if:
                   - condition: template
                     value_template: "{{ phases != 1 }}"
@@ -615,6 +698,15 @@ automation:
               - condition: template
                 value_template: "{{ charging and stop_held }}"
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen solar
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    Stop — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
+                    stayed below the start threshold for
+                    {{ states('input_number.alfen_solar_hold') | round(0) }} min.
+                    {{ 'Resetting to 1-phase.' if phases == 3 else '' }}
               - if:
                   - condition: template
                     value_template: "{{ phases == 3 }}"
@@ -631,6 +723,14 @@ automation:
               - condition: template
                 value_template: "{{ charging and (head | float < minc | float) }}"
             sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen solar
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    PAUSE — fuse headroom {{ head }} A is below the
+                    {{ minc | round(0) }} A floor, so even minimum charging no longer
+                    fits on the tightest phase. Was charging at {{ cur | round(0) }} A.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -653,11 +753,31 @@ automation:
                 data:
                   phases: 1
 
-          # 6) Charging -> modulate toward the surplus target (>=1 A deadband).
+          # 6) Charging -> modulate toward the surplus target.
+          #    ASYMMETRIC deadband, same principle as the fuse guard: writing a
+          #    LOWER current makes the car re-negotiate (expensive, can drop the
+          #    session); writing a HIGHER one does not. So:
+          #      up   -> write on the normal 1 A deadband
+          #      down -> write only once surplus has fallen by the Solar
+          #              step-down buffer, so passing clouds don't trigger a
+          #              re-negotiation on every 20 s tick.
+          #    Safety exception: the buffer only damps SURPLUS-driven drops. If
+          #    the fuse headroom is what is capping the target, down_gate falls
+          #    back to 1 A so the car still comes down at once.
+          #    Branch 3 above still pauses outright if 6 A no longer fits.
           - conditions:
               - condition: template
-                value_template: "{{ charging and ((newt | float - cur | float) | abs >= 1) }}"
+                value_template: >
+                  {{ charging and (
+                       ((newt | float) - (cur | float) >= 1)
+                       or ((cur | float) - (newt | float) >= down_gate | float)
+                     ) }}
             sequence:
+              # Deliberately NOT logged. Routine surplus tracking is normal
+              # operation -- tens of writes an hour on a broken-cloud day -- and
+              # logging it would bury every real safety event in the logbook.
+              # The setpoint trajectory is already in the history of
+              # input_number.alfen_target_current.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ newt }}"
