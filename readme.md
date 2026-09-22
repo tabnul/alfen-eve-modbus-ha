@@ -81,7 +81,6 @@ The package consists of these files:
 | `alfen_modbus.yaml` | Reads every charger value as a sensor | Include from `configuration.yaml`: `modbus: !include alfen_modbus.yaml` |
 | `packages/alfen.yaml` | The control logic: settings, sensors, scripts, automations | Your `packages/` folder |
 | `alfen_dashboard.yaml` | The dashboard, with optional help text | Paste into a dashboard's raw configuration editor |
-| `optional_alfen_price.yaml` | Example of price-based charging | Optional; `packages/` folder |
 
 If packages aren't enabled yet, add this to `configuration.yaml`:
 
@@ -92,7 +91,7 @@ homeassistant:
 
 Put your charger's IP address in `alfen_modbus.yaml` (`host:`). **Give the charger a fixed IP address** (a DHCP reservation): Home Assistant only reads the address at startup, so if it changes, the connection silently stops working.
 
-The price file is only an example of how to add your own rules on top. It does one thing — change the charge mode — and never controls current or phases directly, so it can't conflict with the rest. Any automation of your own should follow the same rule: set `input_select.alfen_charge_mode` and nothing else.
+Want to charge on cheap electricity prices, a schedule, or anything else? See *Adding your own rules* below; nothing in the package itself needs changing.
 
 A full restart of Home Assistant is needed after installing or updating, because the package adds new helpers and sensors.
 
@@ -123,7 +122,6 @@ Everything is adjustable from the dashboard; you never need to edit the code. Yo
 | Min current | The lowest current charging can run at. 6 A is the minimum every car and charger supports. | 6 A |
 | Stop current | The value sent to pause the car. Anything below 6 A pauses charging. | 5 A |
 | Fuse per phase | The most current the whole house (car plus everything else) may use on one phase. Set a little below your main fuse. | e.g. 24 A for a 25 A fuse |
-| Price fallback | The mode to return to when a cheap-price window ends (only with the price example). | Solar |
 
 ### Smart meter
 
@@ -183,6 +181,32 @@ Every phase switch pauses charging for about 15 seconds, so the fixed choices ar
 **If your car doesn't like frequent restarts**, the calmest Solar setup is *Solar phases* on **1-phase only** (or **3-phase only** with a large installation) and *Keep charging at minimum* **on**. That removes every start, stop and phase switch: the car simply keeps charging and follows the sun. Remember it then also charges at night, from the grid.
 
 ---
+
+## Adding your own rules
+
+The package decides *how* to charge; you decide *when*. Price-based charging, a timer, a button on your phone, a rule that charges fast when you're leaving early — all of these go in your own automations, outside the package.
+
+**One rule:** your automations may only change the charge mode, `input_select.alfen_charge_mode` (`Off`, `Solar` or `Fast`). Never write current or phases yourself, and never call the package's scripts. That way the fuse protection and everything else keep working, and your rules can't conflict with the package.
+
+Example — charge fast while a cheap-price period is active, and go back to Solar afterwards. Replace `binary_sensor.cheap_power` with your own sensor (for example from a dynamic-price integration):
+
+```yaml
+automation:
+  - id: my_cheap_power_charging
+    alias: Charge fast when power is cheap
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.cheap_power
+        to: ["on", "off"]
+    actions:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.alfen_charge_mode
+        data:
+          option: "{{ 'Fast' if trigger.to_state.state == 'on' else 'Solar' }}"
+```
+
+Put it in `automations.yaml` or in a package file of your own, not in `packages/alfen.yaml`, so updating the package never overwrites it.
 
 ## The event log
 

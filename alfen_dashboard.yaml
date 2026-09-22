@@ -93,8 +93,6 @@ views:
               everything else) may use on one phase. Set it a little below your
               main fuse, e.g. 24 A for a 25 A fuse.
 
-              **Price fallback** — the mode to return to when a cheap-price
-              window ends (only used if you've set up price-based charging).
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -113,8 +111,6 @@ views:
                 name: Stop current — suggest 5
               - entity: input_number.alfen_fuse_per_phase
                 name: Fuse per phase — suggest 24
-              - entity: input_select.alfen_price_fallback
-                name: Price fallback
 
           - type: heading
             heading: Smart Meter

@@ -1,4 +1,5 @@
-# packages/alfen.yaml — generic control engine. No site-specific price wiring.
+# packages/alfen.yaml — generic control engine. Knows nothing about prices or
+# schedules: your own automations may only ever set input_select.alfen_charge_mode.
 # Modes: Off / Solar / Fast. Solar always starts 1-phase and switches up only on
 # sustained 3-phase surplus. Both the fuse guard and the Solar modulate loop use an
 # ASYMMETRIC deadband: writing a LOWER current makes the car re-negotiate (IEC 61851),
@@ -155,11 +156,6 @@ input_select:
       - "Off"
       - "Solar"
       - "Fast"
-  alfen_price_fallback:
-    name: Alfen price fallback
-    options:
-      - "Off"
-      - "Solar"
   # How many phases Solar may use. Auto switches between 1 and 3 on the
   # surplus thresholds; the fixed choices never switch. Anything else (e.g. the
   # helper not restored yet on first start) is treated as Auto.
