@@ -28,10 +28,9 @@ views:
               **Off** — the car stays plugged in but doesn't charge.
 
               **Solar** — charges only from electricity your panels would
-              otherwise send back to the grid. It starts slowly on one phase,
-              follows the sun up and down, and moves to three phases when
-              there's enough surplus. It pauses when the sun isn't strong
-              enough, unless *Keep charging at minimum* is on (see Solar tuning).
+              otherwise send back to the grid, following the sun up and down.
+              How many phases it uses and whether it pauses when the sun is
+              weak are set under Solar tuning.
 
               **Fast** — charges as fast as the car and your fuses allow, using
               grid power if needed. If the house is using a lot of power on
@@ -118,6 +117,56 @@ views:
                 name: Price fallback
 
           - type: heading
+            heading: Smart Meter
+
+          - type: markdown
+            content: >-
+              <ha-alert alert-type="info">Smart meter</ha-alert>
+
+              The system needs your smart meter to know how much the house
+              uses and how much solar is left over. On first start these four
+              fields are filled in with the names a HomeWizard P1 meter uses.
+              If yours are different, change them here; your values are kept
+              across restarts. (An emptied field is filled in again with the
+              HomeWizard name at the next restart.)
+
+              Each sensor must report power in **watts (W)**, positive when you
+              use power from the grid and negative when you send it back.
+
+              **Meter OK** — on when all four exist and report watts. While
+              it's off (a wrong name, a sensor in kW, or the meter
+              stopped working for more than 30 seconds), the car is held at the
+              minimum current (6 A), because the fuse can't be protected without
+              it. Solar also stops making its own decisions until then.
+            visibility:
+              - condition: state
+                entity: input_boolean.alfen_dashboard_show_help
+                state: "on"
+
+          - type: markdown
+            content: >-
+              <ha-alert alert-type="warning">**Smart meter not working.**
+              Charging is held at 6 A and Solar is paused until all four meter
+              sensors below exist and report watts.</ha-alert>
+            visibility:
+              - condition: state
+                entity: binary_sensor.alfen_meter_ok
+                state_not: "on"
+
+          - type: entities
+            entities:
+              - entity: binary_sensor.alfen_meter_ok
+                name: Meter OK
+              - entity: input_text.alfen_meter_total
+                name: Total power sensor
+              - entity: input_text.alfen_meter_l1
+                name: L1 power sensor
+              - entity: input_text.alfen_meter_l2
+                name: L2 power sensor
+              - entity: input_text.alfen_meter_l3
+                name: L3 power sensor
+
+          - type: heading
             heading: Fuse Guard Tuning
 
           - type: markdown
@@ -126,7 +175,8 @@ views:
 
               The fuse guard checks every 20 seconds whether the house plus the
               car still fits under *Fuse per phase*, and slows the car down if
-              not. It always runs, in every mode.
+              not. It always runs, in every mode — also in Solar — so your fuse
+              is protected in exactly the same way whatever mode you use.
 
               Many cars briefly stop and restart whenever the charging current is
               **lowered**. Raising it causes no interruption. That's why the
@@ -139,8 +189,9 @@ views:
               before the guard reacts. Suggested 1 A.
 
               **Step-up buffer** — how much spare room there must be before the
-              guard raises the current again. Stops it from going straight back
-              up into a limit it just backed away from. Suggested 2 A.
+              current is raised again. Stops it from going straight back up
+              into a limit it just backed away from. Solar also never raises
+              into this last bit of room. Suggested 2 A.
 
               **Scale-down settle time** — how long the house must stay over the
               limit before the guard lowers the current. Ignores short spikes,
@@ -150,8 +201,9 @@ views:
               before the guard raises the current. Suggested 60 s.
 
               **Scale-up cooldown** — after the guard has lowered or stopped
-              charging, it waits at least this long before raising it again.
-              Suggested 3 min.
+              charging, nothing raises or restarts it for at least this long,
+              in Solar too. Stops a switching appliance (dryer, heat pump) from
+              bouncing the car up and down. Suggested 3 min.
 
               **Sustained overload timeout** — if even the minimum 6 A doesn't
               fit, how long to wait before stopping completely. Short overloads
@@ -159,6 +211,10 @@ views:
 
               **Last fuse-guard action** — when the guard last lowered or
               stopped charging.
+
+              **Without meter data** the guard can't see the fuse, so after 30
+              seconds it holds the car at 6 A until the meter works again (see
+              Smart meter).
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -191,21 +247,44 @@ views:
               These settings only apply in **Solar** mode. Changes take effect
               immediately.
 
+              **Solar phases** — how many phases Solar may use.
+              *Auto*: starts on one phase and moves to three when there's enough
+              sun (1.4 to 11 kW). *1-phase only*: never uses three phases
+              (1.4 to 3.7 kW); good for smaller installations. *3-phase only*:
+              always three phases (4.1 to 11 kW); good for large installations.
+              The fixed choices never switch phases, so charging is never
+              paused for a switch.
+
               **Keep charging at minimum** — off: charging pauses when the sun
-              isn't strong enough. On: the car always charges at least at 6 A,
-              plus whatever the sun adds on top. Turn this on if your car
-              doesn't like being stopped and restarted often; the price is some
-              grid power on cloudy days. It still stops if the fuse can't take
-              6 A.
+              isn't strong enough. On: the car always charges at least at the
+              minimum, plus whatever the sun adds. That minimum is about 1.4 kW
+              on one phase or 4.1 kW on three. Fewer stops and restarts, but
+              note it also keeps charging **at night, from the grid**, until the
+              car is full or you change mode. It still stops if the fuse can't
+              take the minimum.
 
               **Start/stop hold** — how long the sun must be strong enough (or
               too weak) before charging starts or pauses. Longer means fewer
               stops on cloudy days. Suggested 3 min.
 
-              **Phase up at** — how much surplus is needed before switching from
-              one to three phases. Three phases need at least about 4.1 kW, so
-              setting this higher gives a margin. Set it to the maximum to never
-              use three phases in Solar. Suggested 4800 W.
+              **Solar step-down buffer** — how far the sun must drop before
+              charging slows down. Small dips are ignored. Suggested 2 A.
+
+              **Slow-down wait** — how long the sun must stay lower before
+              charging slows down. A passing cloud shorter than this is ignored
+              completely, so the car isn't slowed down (and possibly restarted)
+              for it. Longer is calmer but uses a bit more grid power. Speeding
+              up again never waits. Suggested 60 s.
+
+              These two only react to the sun. Slowing down to protect the fuse
+              is always done by the fuse guard, with its own settings.
+
+              The next four settings are only used when *Solar phases* is
+              **Auto**.
+
+              **Phase up at** — how much surplus is needed before moving from one
+              to three phases. Three phases need at least about 4.1 kW, so a
+              higher value gives a margin. Suggested 4800 W.
 
               **Phase down at** — below this surplus it goes back to one phase.
               Suggested 4140 W.
@@ -215,13 +294,8 @@ views:
 
               **Phase switch cooldown** — the minimum time between two phase
               switches. Each switch pauses charging for about 15 seconds, so
-              this stops it switching back and forth. Suggested 12 min.
-
-              **Solar step-down buffer** — how far the sun must drop before
-              charging slows down. Small dips from passing clouds are ignored,
-              so the car isn't slowed down (and possibly restarted) every few
-              seconds. Higher is calmer but uses a bit more grid power.
-              Suggested 2 A. This never delays slowing down to protect the fuse.
+              this stops it switching back and forth. Also applies when a fixed
+              choice has to correct the phases. Suggested 12 min.
 
               **Last phase switch** — when the phases last changed.
             visibility:
@@ -231,20 +305,24 @@ views:
 
           - type: entities
             entities:
+              - entity: input_select.alfen_solar_phases
+                name: Solar phases
               - entity: input_boolean.alfen_solar_keep_min
                 name: Keep charging at minimum
               - entity: input_number.alfen_solar_hold
                 name: Start/stop hold — suggest 3
-              - entity: input_number.alfen_phase_up_threshold
-                name: ▲ Phase up at — suggest 4800
-              - entity: input_number.alfen_phase_down_threshold
-                name: ▼ Phase down at — suggest 4140
-              - entity: input_number.alfen_phase_hold
-                name: Phase switch hold — suggest 3
-              - entity: input_number.alfen_phase_cooldown
-                name: Phase switch cooldown — suggest 12
               - entity: input_number.alfen_solar_step_down_buffer
                 name: Solar step-down buffer — suggest 2
+              - entity: input_number.alfen_solar_down_settle
+                name: Slow-down wait — suggest 60
+              - entity: input_number.alfen_phase_up_threshold
+                name: ▲ Phase up at (Auto) — suggest 4800
+              - entity: input_number.alfen_phase_down_threshold
+                name: ▼ Phase down at (Auto) — suggest 4140
+              - entity: input_number.alfen_phase_hold
+                name: Phase switch hold (Auto) — suggest 3
+              - entity: input_number.alfen_phase_cooldown
+                name: Phase switch cooldown — suggest 12
               - entity: input_datetime.alfen_last_phase_switch
                 name: Last phase switch
 
@@ -298,17 +376,17 @@ views:
             name: Charger Draw
             icon: mdi:lightning-bolt
           - type: tile
-            entity: sensor.p1_meter_power
+            entity: sensor.alfen_grid_power
             name: Net Grid Power
             icon: mdi:transmission-tower
           - type: tile
-            entity: sensor.p1_meter_power_phase_1
+            entity: sensor.alfen_grid_l1
             name: Grid L1
           - type: tile
-            entity: sensor.p1_meter_power_phase_2
+            entity: sensor.alfen_grid_l2
             name: Grid L2
           - type: tile
-            entity: sensor.p1_meter_power_phase_3
+            entity: sensor.alfen_grid_l3
             name: Grid L3
 
           - type: entities
@@ -338,9 +416,11 @@ views:
 
               - fuse guard slowing down, speeding back up, or stopping
 
-              - Solar starting, pausing, or pausing because the fuse was full
+              - Solar starting or pausing
 
               - the car being unplugged or reporting a fault
+
+              - meter data missing, and the car being held at minimum
 
               - every phase switch, including the Force buttons
 

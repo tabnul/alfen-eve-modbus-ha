@@ -38,13 +38,12 @@ Switching between one and three phases is different: that always needs a short p
 - An **Alfen Eve Pro-line or S-line** on the **NG9xx** platform. Developed and tested on firmware **7.4.5**.
 - The **Active Load Balancing** licence on the charger (a paid option from Alfen). Without it the charger can't be controlled over Modbus.
 - Access to the **ACE Service Installer** app (an installer-level Alfen account) to change the charger settings below.
-- A **P1 smart-meter reader** (for example HomeWizard) that reports **total** power and **power per phase**, with import as a positive number and export as negative.
+- A **P1 smart-meter reader** (for example HomeWizard) with four sensors: **total power** and **power per phase** (L1, L2, L3). Each must report in **watts (W)**, positive when you use power from the grid and negative when you send it back. You choose the sensors on the dashboard.
 - Home Assistant with **packages** enabled, and the **apexcharts-card** (from HACS) for the dashboard chart.
 
-### Things you may need to adapt
+### Something you may need to adapt
 
 - **Single-phase charging is assumed to use L1.** If your charger is wired so that one-phase charging uses a different phase, change the L1 references in the headroom sensors.
-- **Meter entity names** are assumed to be `sensor.p1_meter_power` (total) and `sensor.p1_meter_power_phase_1/2/3`. Change them throughout if yours are named differently.
 
 ---
 
@@ -105,7 +104,7 @@ Doing it step by step means that if something fails, you know which part it is.
 
 1. **Check the connection.** Load `alfen_modbus.yaml` and restart. The charger sensors should fill in: voltages around 230 V, a sensible temperature.
 2. **Check that commands arrive.** Load the package and restart. In Developer Tools, run `script.alfen_set_current` with `amps: 6`. *Setpoint readback* should show 6 and *Setpoint accounted for* should show 1. If so, Home Assistant can control the charger.
-3. **Set your fuse limit** (*Fuse per phase*) before anything else. A wrong value affects everything.
+3. **Set up your meter and fuse limit** before anything else. Check the four meter sensors under *Smart meter* (they start with the HomeWizard names; change them if yours differ) and make sure *Meter OK* is on. Until then charging is held at 6 A. Then set *Fuse per phase*. Wrong values here affect everything.
 4. **Try the modes.** Try Fast, Solar and the Force 1-Phase / 3-Phase buttons. In Fast, switch on a big appliance and watch the car slow down, then speed up again when it's off. This is deliberately not instant: slowing down waits about 40 seconds, speeding up about a minute plus a 3-minute cooldown.
 5. **Try Solar on a cloudy day.** Look at the history of *Commanded current*. Short clouds should be ignored and it should change in steady steps, not jump every 20 seconds. If it still follows every cloud, make the *Slow-down wait* longer.
 6. **Check the event log** on the dashboard. A Force-phase button press is the quickest way to create an entry.
@@ -125,6 +124,18 @@ Everything is adjustable from the dashboard; you never need to edit the code. Yo
 | Stop current | The value sent to pause the car. Anything below 6 A pauses charging. | 5 A |
 | Fuse per phase | The most current the whole house (car plus everything else) may use on one phase. Set a little below your main fuse. | e.g. 24 A for a 25 A fuse |
 | Price fallback | The mode to return to when a cheap-price window ends (only with the price example). | Solar |
+
+### Smart meter
+
+| Setting | What it does | Filled in on first start |
+| --- | --- | --- |
+| Total power sensor | Your meter's total power sensor. | `sensor.p1_meter_power` |
+| L1 / L2 / L3 power sensor | Your meter's power sensor for each phase. | `sensor.p1_meter_power_phase_1` / `_2` / `_3` |
+| Meter OK | Shows whether all four sensors are filled in, work and report watts. | — |
+
+On first start the four fields are filled in with the names a HomeWizard P1 meter uses. If yours are different, change them on the dashboard; your values are kept across restarts. (Only empty fields are filled, so your own names are never replaced; an emptied field gets the HomeWizard name again at the next restart.) The logic only uses what is in the fields, with no hidden fallback. The sensors must report **watts**, positive for power taken from the grid and negative for power sent back. A sensor in kW, or a name that doesn't exist, keeps *Meter OK* off, and a warning shows on the dashboard.
+
+**If the meter doesn't work** (*Meter OK* off for more than 30 seconds), the car is held at the minimum current (6 A) until it works again. Without meter data the fuse can't be protected, so this is the safe choice. Solar also stops making its own decisions until then, and the event log shows what happened. The 30 seconds ignore short hiccups and the meter still starting up after a Home Assistant restart.
 
 ### Fuse guard
 
@@ -180,6 +191,7 @@ The dashboard shows a 48-hour log of every decision that changed what the car ma
 - the fuse guard slowing down, speeding back up, or stopping
 - Solar starting or pausing
 - the car being unplugged or reporting a fault
+- meter data missing, and the car being held at minimum
 - every phase switch, including the Force buttons
 
 Normal following of the sun is **not** logged — on a cloudy day that's dozens of small changes an hour and would drown everything else. The history of *Commanded current* shows that instead. Expect roughly 10–20 entries on a normal day.
@@ -196,7 +208,7 @@ This is the electricity that went from the charger into the car — what you pai
 
 ## Good to know
 
-- **Fuse protection is a software safety net, not a replacement for your fuses.** It reacts within about a minute, and it does nothing if the smart-meter data is missing. It prevents nuisance trips; it is not a circuit breaker.
+- **Fuse protection is a software safety net, not a replacement for your fuses.** It reacts within about a minute. If the smart-meter data is missing it can't see the fuse at all, and holds the car at 6 A until the meter is back. It prevents nuisance trips; it is not a circuit breaker.
 - **Current changes in whole amps**, so each step is about 230 W on one phase or 690 W on three. That's how charging works, not a limitation of this package.
 - **Solar waits on purpose.** It needs the sun to hold for a few minutes before it starts, stops or switches phases. On a changeable day it pauses more and switches less; that's the trade-off for not constantly stopping the car. All waiting times are adjustable.
 - **A phase switch pauses charging for about 15 seconds**, and happens at most once per *Phase switch cooldown*.
@@ -218,13 +230,15 @@ This section is for anyone changing the code.
 
 | Part | Role |
 | --- | --- |
-| `script.alfen_set_current` | The only way current is changed. Writes register 1210 (float32, two 16-bit words, big-endian) and records the value in `input_number.alfen_target_current`, which every loop treats as "what we last commanded". |
+| `script.alfen_set_current` | The only way current is changed. Writes register 1210 (float32, two 16-bit words, big-endian) and records the value in `input_number.alfen_target_current`, which every loop treats as "what we last commanded". See *Why five automations and not one* below. |
 | `script.alfen_switch_phases` | Pause (stop current) → wait 10 s → write register 1215 → wait 5 s → resume at min current. Stamps `input_datetime.alfen_last_phase_switch`. |
-| `alfen_setpoint_renew` | Keep-alive. Rewrites the current value every 30 s while a car is connected. Kept separate so nothing can delay it. |
+| `alfen_setpoint_renew` | Keep-alive. Every 30 s while a car is connected, asks the write script to resend the current value. Kept separate so nothing can delay it. |
 | `alfen_fuse_guard` | Every 20 s, all modes. The only thing that lowers or stops charging for the fuse, in every mode, so fuse behaviour is identical in Solar and Fast. Also raises again in Fast; in Fast it is the only thing that writes after the mode is applied. |
 | `alfen_solar` | Every 20 s in Solar. One `choose`, so at most one action per tick: start, stop, correct the phases (fixed phase setting), phase up / down (Auto only), follow the sun down (after the slow-down wait) or follow the sun up. |
 | `alfen_charge_mode_apply` | Applies the mode on mode change, Home Assistant start, and plug-in. |
 | `alfen_disconnect_pause` | Pauses when the car is unplugged or faulted (Mode 3 A/E/F for 10 s). |
+
+**Meter data** comes in through `sensor.alfen_grid_power` and `sensor.alfen_grid_l1/l2/l3`, which read whichever meter sensors are set in `input_text.alfen_meter_*`. On Home Assistant start, empty fields are filled with the HomeWizard names (never overwriting a value); beyond that there is no fallback, so the logic only uses what is in the fields. They're only available when the source exists, is a number and is in W. Everything else reads these four, never the meter directly. `binary_sensor.alfen_meter_ok` is on when all four are available; after 30 s off, the fuse guard holds at min current and the Solar loop stands still. Mode routing in Fast sets min current instead of max without meter data, except right after a Home Assistant start, when it leaves the current alone so a slow-loading meter can't cause a needless drop.
 
 The control loops are **level-triggered**: they re-check the current situation on every tick instead of reacting to a value crossing a threshold, so they can't miss a change. Durations ("surplus has been above X for N minutes") are measured from the `last_changed` of dedicated binary sensors.
 
@@ -241,13 +255,25 @@ That removes the difference that used to exist: Solar reacted to a kettle within
 
 **Headroom** per phase is `fuse per phase − house load on that phase`, capped at *Fuse per phase*. The cap matters when exporting: the smart meter reports *net* power, so the house load can come out negative and the raw headroom would exceed the fuse. That extra only exists while the sun holds, so it's never offered to the car. In one-phase mode L1 governs; in three-phase mode the tightest phase does.
 
+### Why five automations and not one
+
+The five automations run independently, so two of them can want to change the current at the same moment: the fuse guard and the Solar loop both tick every 20 s, and the keep-alive every 30 s. Merging them all into one automation that does everything strictly one step at a time would rule that out by design, but it would also make one very long automation that is harder to read and change.
+
+Instead, every write goes through one place, `script.alfen_set_current`, and that script makes simultaneous writes harmless:
+
+- **One at a time, in order.** It runs *queued*: a write that arrives while another is busy waits its turn instead of being dropped.
+- **Never an old value.** The keep-alive doesn't pass a number; the script reads the current value at the moment it writes. So the keep-alive can't put back a value that the fuse guard has just lowered.
+- **Nothing during a phase switch.** While `script.alfen_switch_phases` runs, the script refuses every write except the switch's own. This is checked at the moment of writing, not only when an automation starts.
+
+`script.alfen_set_phases` has the same protections. Keep it that way: **never write the charger's registers directly from an automation — always go through these two scripts.**
+
 ### Rules that must not be broken
 
 Each of these caused a real failure when it was broken. They're easy to break by accident because the result often looks like it works.
 
 1. **Never compare the raw Mode 3 register.** The charger sends the state as a 10-byte text value, so "unplugged" arrives as `A` plus nine padding characters and never equals `'A'`. Any "is a car connected?" check against `sensor.alfen_mode3_state` is always true. Always use the cleaned `sensor.alfen_mode3`. You can see the padding in Developer Tools → Template: `{{ states('sensor.alfen_mode3_state') | length }}` returns 10.
 
-2. **Never write current while a phase switch is running.** The switch script lowers the current and holds it for 10 seconds so the phases change with no load. A loop that sees that low value will think there's room and raise it again — into the middle of the pause. The charger then won't switch and stays on the old number of phases. The fuse guard and Solar loop therefore only run while `script.alfen_switch_phases` is `off`. The keep-alive is the exception: it only repeats the current value, which during a switch is the pause value.
+2. **Never write current while a phase switch is running.** The switch script lowers the current and holds it for 10 seconds so the phases change with no load. A loop that sees that low value will think there's room and raise it again — into the middle of the pause. The charger then won't switch and stays on the old number of phases. The write script refuses any write during a switch except the switch's own (see above), and the fuse guard and Solar loop also don't start while a switch runs.
 
 3. **Nothing that switches phases may be triggered by Mode 3 changes — except plugging in.** A phase switch itself changes Mode 3 (charging → connected → charging). An automation with `mode: restart` that both triggers on Mode 3 and calls the switch script will restart itself in the middle of the switch; because the script is called as a service it is part of that run and gets cancelled too. `alfen_charge_mode_apply` therefore only triggers on Mode 3 leaving `A` (plug-in), which a phase switch never causes. Everything else Mode-3-related lives in `alfen_disconnect_pause`, which never switches phases.
 

@@ -188,8 +188,43 @@ input_boolean:
     name: Alfen events
     icon: mdi:shield-car
 
+# Which smart-meter sensors to use. Filled with the HomeWizard P1 names on
+# first start (see alfen_charge_mode_apply); change them on the dashboard if
+# yours differ -- Home Assistant keeps your values across restarts. The logic
+# only uses what is in these fields: until all four point at working sensors,
+# binary_sensor.alfen_meter_ok stays off and the car is held at minimum
+# current. Each sensor must report power in W, import positive, export
+# negative (the HomeWizard P1 convention).
+input_text:
+  alfen_meter_total:
+    name: Alfen meter – total power
+    max: 255
+  alfen_meter_l1:
+    name: Alfen meter – L1 power
+    max: 255
+  alfen_meter_l2:
+    name: Alfen meter – L2 power
+    max: 255
+  alfen_meter_l3:
+    name: Alfen meter – L3 power
+    max: 255
+
 template:
   - binary_sensor:
+      # True when all four meter sensors are filled in and available as numbers
+      # in W. Off on a fresh install until they're set up. When it
+      # has been off for 30 s, the fuse guard holds the car at minimum current
+      # (it can't protect the fuse without meter data) and Solar pauses its own
+      # decisions. The 30 s ignores short meter hiccups and the meter still
+      # loading right after a Home Assistant restart.
+      - name: alfen_meter_ok
+        unique_id: alfen_meter_ok
+        state: >
+          {{ is_number(states('sensor.alfen_grid_power'))
+             and is_number(states('sensor.alfen_grid_l1'))
+             and is_number(states('sensor.alfen_grid_l2'))
+             and is_number(states('sensor.alfen_grid_l3')) }}
+
       # Surplus threshold flags. last_changed lets the control loop measure how long
       # a condition has held (level-triggered, no missed edges).
       # Start threshold = minimum current on the phases Solar will start on:
@@ -279,6 +314,59 @@ template:
           } %}
           {{ m.get(s, s ~ ' (unmapped)') }}
 
+      # Grid power as reported by the configured meter entities (see
+      # input_text.alfen_meter_*). Everything else reads these, never the meter
+      # directly. Unavailable unless a sensor is filled in, exists, reports a
+      # number, and is in W. No fallback name: an empty field means no meter.
+      - name: alfen_grid_power
+        unique_id: alfen_grid_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        availability: >
+          {% set e = states('input_text.alfen_meter_total') | trim %}
+          {{ e.startswith('sensor.') and is_number(states(e))
+             and state_attr(e, 'unit_of_measurement') == 'W' }}
+        state: >
+          {% set e = states('input_text.alfen_meter_total') | trim %}
+          {{ states(e) | float(0) }}
+      - name: alfen_grid_l1
+        unique_id: alfen_grid_l1
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        availability: >
+          {% set e = states('input_text.alfen_meter_l1') | trim %}
+          {{ e.startswith('sensor.') and is_number(states(e))
+             and state_attr(e, 'unit_of_measurement') == 'W' }}
+        state: >
+          {% set e = states('input_text.alfen_meter_l1') | trim %}
+          {{ states(e) | float(0) }}
+      - name: alfen_grid_l2
+        unique_id: alfen_grid_l2
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        availability: >
+          {% set e = states('input_text.alfen_meter_l2') | trim %}
+          {{ e.startswith('sensor.') and is_number(states(e))
+             and state_attr(e, 'unit_of_measurement') == 'W' }}
+        state: >
+          {% set e = states('input_text.alfen_meter_l2') | trim %}
+          {{ states(e) | float(0) }}
+      - name: alfen_grid_l3
+        unique_id: alfen_grid_l3
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        availability: >
+          {% set e = states('input_text.alfen_meter_l3') | trim %}
+          {{ e.startswith('sensor.') and is_number(states(e))
+             and state_attr(e, 'unit_of_measurement') == 'W' }}
+        state: >
+          {% set e = states('input_text.alfen_meter_l3') | trim %}
+          {{ states(e) | float(0) }}
+
       - name: alfen_solar_surplus
         unique_id: alfen_solar_surplus
         unit_of_measurement: W
@@ -286,7 +374,7 @@ template:
         state_class: measurement
         state: >
           {{ (states('sensor.alfen_power_sum') | float(0))
-             - (states('sensor.p1_meter_power') | float(0)) }}
+             - (states('sensor.alfen_grid_power') | float(0)) }}
 
       # What the sun alone would support, per phase, on the current phase count:
       # surplus / (phases x 230), between min and max current. Deliberately NOT
@@ -312,7 +400,7 @@ template:
           {% set v = 230 %}
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l1') | float(0) %}
-          {% set house = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car %}
+          {% set house = (states('sensor.alfen_grid_l1') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
               well above the cap. That credit is real only
@@ -328,7 +416,7 @@ template:
           {% set v = 230 %}
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l2') | float(0) %}
-          {% set house = (states('sensor.p1_meter_power_phase_2') | float(0)) / v - car %}
+          {% set house = (states('sensor.alfen_grid_l2') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
               well above the cap. That credit is real only
@@ -344,7 +432,7 @@ template:
           {% set v = 230 %}
           {% set fuse = states('input_number.alfen_fuse_per_phase') | float(25) %}
           {% set car = states('sensor.alfen_current_l3') | float(0) %}
-          {% set house = (states('sensor.p1_meter_power_phase_3') | float(0)) / v - car %}
+          {% set house = (states('sensor.alfen_grid_l3') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
               well above the cap. That credit is real only
@@ -382,19 +470,40 @@ template:
           {{ (states('sensor.alfen_energy_delivered_sum') | float(0) / 1000) | round(3) }}
 
 script:
+  # THE single write path for the charge current. Every automation and script
+  # goes through here, so these protections apply to all of them at once:
+  #  - mode: queued -> writes that arrive at the same moment are done one after
+  #    the other, in order. None is silently dropped.
+  #  - no amps given -> resend the current value, read at the moment of writing
+  #    (used by the keep-alive), so it can never write back a value that another
+  #    write has just replaced.
+  #  - while a phase switch runs, only the switch itself may write. Checked here,
+  #    at write time, not only when an automation starts.
   alfen_set_current:
+    mode: queued
+    max: 20
     fields:
       amps:
-        description: Target current in Amps
+        description: Target current in amps. Leave out to resend the current value.
+      during_switch:
+        description: Only set by alfen_switch_phases.
     sequence:
+      - condition: template
+        value_template: >
+          {{ (during_switch | default(false))
+             or is_state('script.alfen_switch_phases', 'off') }}
+      - variables:
+          value: >
+            {{ (amps if amps is defined
+                else states('input_number.alfen_target_current')) | float(0) }}
       - service: input_number.set_value
         target:
           entity_id: input_number.alfen_target_current
         data:
-          value: "{{ amps | float(0) }}"
+          value: "{{ value | float(0) }}"
       - variables:
           words: >
-            {% set v = amps | float(0) %}
+            {% set v = value | float(0) %}
             {% if v <= 0 %}
             {{ [0, 0] }}
             {% else %}
@@ -416,11 +525,21 @@ script:
           address: 1210
           value: "{{ words }}"
 
+  # Raw phase write. Same protections as alfen_set_current: queued, and refused
+  # while a phase switch runs unless the switch itself calls it.
   alfen_set_phases:
+    mode: queued
+    max: 5
     fields:
       phases:
         description: 1 or 3
+      during_switch:
+        description: Only set by alfen_switch_phases.
     sequence:
+      - condition: template
+        value_template: >
+          {{ (during_switch | default(false))
+             or is_state('script.alfen_switch_phases', 'off') }}
       - service: modbus.write_register
         data:
           hub: alfen
@@ -442,19 +561,22 @@ script:
           entity_id: input_boolean.alfen_events
           message: >-
             Switch {{ states('sensor.alfen_phases') }} → {{ phases }}-phase
-            (surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W).
+            (surplus {{ states('sensor.alfen_solar_surplus') | float(0) | round(0) | int }} W).
             Pause, switch, resume at minimum — ~15 s charging gap.
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+          during_switch: true
       - delay: "00:00:10"
       - service: script.alfen_set_phases
         data:
           phases: "{{ phases }}"
+          during_switch: true
       - delay: "00:00:05"
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
+          during_switch: true
       - service: input_datetime.set_datetime
         target:
           entity_id: input_datetime.alfen_last_phase_switch
@@ -475,18 +597,16 @@ automation:
           {{ states('sensor.alfen_mode3')
              not in ['A','E','F','unknown','unavailable'] }}
     actions:
+      # No amps: the script re-reads the current value at the moment it writes,
+      # so this can never put back a value another write has just replaced.
       - service: script.alfen_set_current
-        data:
-          amps: "{{ states('input_number.alfen_target_current') | float(0) }}"
 
-  # --- Always-on fuse protection (separate, 5s cadence) ---
-  # --- Fuse guard (every 5s, all modes): keep every phase under the fuse by
-  #     ADJUSTING the charge current, not cutting it. In Fast it trims down when a
-  #     phase gets tight and recovers back up to max when it clears. In Solar the
-  #     Cloud ride-through: holds at 6A floor through brief headroom dips (passing
-  #     clouds) instead of stopping. Only stops on SUSTAINED critical headroom (>60s).
-  #     In Fast, also ramps back up toward max when headroom clears. /20s cadence
-  #     matched to 10s P1 meter (avoids acting on stale data). Deadband on writes. ---
+  # --- Fuse guard, every 20 s, all modes: keeps every phase under the fuse by
+  #     ADJUSTING the current rather than cutting it. The only thing that lowers
+  #     or stops charging for the fuse, in every mode. Rides short overloads out
+  #     at the 6 A floor; stops only after the sustained-overload timeout. In
+  #     Fast it also raises the current again once there's room. 20 s suits a
+  #     P1 meter that updates about every 10 s. ---
   - id: alfen_fuse_guard
     alias: Alfen fuse guard
     mode: restart
@@ -518,6 +638,12 @@ automation:
           head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
           cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
           charging: "{{ cur | float >= minc | float }}"
+          # Meter data usable? Without it the headroom is meaningless.
+          meter_ok: "{{ is_state('binary_sensor.alfen_meter_ok', 'on') }}"
+          meter_missing: >
+            {{ not is_state('binary_sensor.alfen_meter_ok', 'on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_meter_ok.last_changed))
+                   >= 30 }}
           mode: "{{ states('input_select.alfen_charge_mode') }}"
           # Is headroom critically low AND sustained? Real overload, not a cloud.
           critical_sustained: >
@@ -551,19 +677,38 @@ automation:
                and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_guard_can_recover.last_changed))
                    >= settle }}
       - choose:
-          # 1) Sustained critical headroom — real overload, stop.
+          # 0) No meter data for 30 s -> the fuse can't be protected, so hold the
+          #    car at minimum current until the meter is back. Safe fallback
+          #    instead of silently doing nothing.
           - conditions:
               - condition: template
-                value_template: "{{ charging and critical_sustained }}"
+                value_template: "{{ meter_missing and charging and (cur | float) > (minc | float) }}"
             sequence:
               - service: logbook.log
                 data:
                   name: Alfen fuse guard
                   entity_id: input_boolean.alfen_events
                   message: >-
-                    STOP — headroom {{ head }} A stayed under the {{ minc | round(0) }} A
-                    floor for {{ states('input_number.alfen_critical_timeout') | round(0) }} s
-                    (sustained overload, not a cloud). Was charging at {{ cur | round(0) }} A.
+                    No meter data for 30 s — can't check the fuse, so holding at
+                    {{ minc | float(0) | round(0) | int }} A until the meter is back. Check the
+                    meter settings on the dashboard. Was at {{ cur | float(0) | round(0) | int }} A.
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ minc }}"
+
+          # 1) Sustained critical headroom — real overload, stop.
+          - conditions:
+              - condition: template
+                value_template: "{{ meter_ok and charging and critical_sustained }}"
+            sequence:
+              - service: logbook.log
+                data:
+                  name: Alfen fuse guard
+                  entity_id: input_boolean.alfen_events
+                  message: >-
+                    STOP — headroom {{ head }} A stayed under the {{ minc | float(0) | round(0) | int }} A
+                    floor for {{ states('input_number.alfen_critical_timeout') | float(0) | round(0) | int }} s
+                    (sustained overload, not a cloud). Was charging at {{ cur | float(0) | round(0) | int }} A.
               - service: script.alfen_set_current
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -580,18 +725,18 @@ automation:
                 # ...and only if that actually lowers the current. Once at the
                 # 6 A floor, repeating the same trim every tick would just be a
                 # pointless write and a duplicate log line; branch 1 takes over.
-                value_template: "{{ charging and down_settled and (safe | float) < (cur | float) }}"
+                value_template: "{{ meter_ok and charging and down_settled and (safe | float) < (cur | float) }}"
             sequence:
               - service: logbook.log
                 data:
                   name: Alfen fuse guard
                   entity_id: input_boolean.alfen_events
                   message: >-
-                    Trim {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
+                    Trim {{ cur | float(0) | round(0) | int }} A → {{ safe | float(0) | round(0) | int }} A — headroom
                     {{ head }} A on the tightest phase, low for at least the
-                    {{ states('input_number.alfen_guard_down_settle') | round(0) }} s
+                    {{ states('input_number.alfen_guard_down_settle') | float(0) | round(0) | int }} s
                     settle window (fuse budget
-                    {{ states('input_number.alfen_fuse_per_phase') | round(0) }} A/phase).
+                    {{ states('input_number.alfen_fuse_per_phase') | float(0) | round(0) | int }} A/phase).
               - service: script.alfen_set_current
                 data:
                   amps: "{{ safe }}"
@@ -606,7 +751,7 @@ automation:
           - conditions:
               - condition: template
                 value_template: >
-                  {{ mode == 'Fast' and stop_cooldown_ok and up_settled
+                  {{ meter_ok and mode == 'Fast' and stop_cooldown_ok and up_settled
                      and head | float >= minc | float }}
             sequence:
               - service: logbook.log
@@ -614,11 +759,11 @@ automation:
                   name: Alfen fuse guard
                   entity_id: input_boolean.alfen_events
                   message: >-
-                    Recover {{ cur | round(0) }} A → {{ safe | round(0) }} A — headroom
+                    Recover {{ cur | float(0) | round(0) | int }} A → {{ safe | float(0) | round(0) | int }} A — headroom
                     {{ head }} A, up-settle
-                    ({{ states('input_number.alfen_guard_up_settle') | round(0) }} s)
+                    ({{ states('input_number.alfen_guard_up_settle') | float(0) | round(0) | int }} s)
                     and cooldown
-                    ({{ states('input_number.alfen_stop_cooldown') | round(0) }} min)
+                    ({{ states('input_number.alfen_stop_cooldown') | float(0) | round(0) | int }} min)
                     both satisfied.
               - service: script.alfen_set_current
                 data:
@@ -655,6 +800,32 @@ automation:
         entity_id: sensor.alfen_mode3
         from: "A"
     actions:
+      # On Home Assistant start: fill EMPTY meter fields with the HomeWizard P1
+      # names, so a fresh install shows real names instead of "unknown". Fields
+      # that already contain something are never touched, so your own names are
+      # kept. (A fixed 'initial:' can't be used: it resets them on every restart.)
+      # The logic itself has no fallback: it only ever uses what is in the field.
+      - if:
+          - condition: template
+            value_template: "{{ trigger.platform == 'homeassistant' }}"
+        then:
+          - repeat:
+              for_each:
+                - { entity: input_text.alfen_meter_total, value: sensor.p1_meter_power }
+                - { entity: input_text.alfen_meter_l1, value: sensor.p1_meter_power_phase_1 }
+                - { entity: input_text.alfen_meter_l2, value: sensor.p1_meter_power_phase_2 }
+                - { entity: input_text.alfen_meter_l3, value: sensor.p1_meter_power_phase_3 }
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: >
+                        {{ states(repeat.item.entity) | trim in ['', 'unknown', 'unavailable'] }}
+                  then:
+                    - service: input_text.set_value
+                      target:
+                        entity_id: "{{ repeat.item.entity }}"
+                      data:
+                        value: "{{ repeat.item.value }}"
       - choose:
           # Off, or no car / error state -> pause.
           - conditions:
@@ -682,11 +853,29 @@ automation:
                   - service: script.alfen_switch_phases
                     data:
                       phases: 3
-              - service: script.alfen_set_current
-                data:
-                  amps: >
-                    {{ [ states('input_number.alfen_max_current') | float(16),
-                         states('sensor.alfen_headroom_active') | float(99) ] | min }}
+              # With meter data: max current, limited by fuse room. Without it:
+              # minimum current (the fuse can't be checked) -- except right after
+              # a Home Assistant restart, when the meter may simply not have
+              # loaded yet; then leave the current alone and let the fuse guard
+              # decide once it has had 30 s.
+              - if:
+                  - condition: state
+                    entity_id: binary_sensor.alfen_meter_ok
+                    state: "on"
+                then:
+                  - service: script.alfen_set_current
+                    data:
+                      amps: >
+                        {{ [ states('input_number.alfen_max_current') | float(16),
+                             states('sensor.alfen_headroom_active') | float(99) ] | min }}
+                else:
+                  - if:
+                      - condition: template
+                        value_template: "{{ trigger.platform != 'homeassistant' }}"
+                    then:
+                      - service: script.alfen_set_current
+                        data:
+                          amps: "{{ states('input_number.alfen_min_current') | float(6) }}"
           # Solar -> hold the car paused until the Solar loop decides to start.
           # Only matters on plug-in (overrides the charger's Safe-current
           # fallback); on a mode selection the loop takes over within 20 s.
@@ -735,7 +924,7 @@ automation:
           message: >-
             PAUSE — Mode 3 state is {{ states('sensor.alfen_mode3') }}
             (car disconnected or not supplying). Was at
-            {{ states('input_number.alfen_target_current') | round(0) }} A.
+            {{ states('input_number.alfen_target_current') | float(0) | round(0) | int }} A.
       - service: script.alfen_set_current
         data:
           amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
@@ -763,6 +952,11 @@ automation:
         value_template: >
           {{ states('sensor.alfen_mode3')
              not in ['A','E','F','unknown','unavailable'] }}
+      # Solar decisions need the meter. Without it the fuse guard holds the car
+      # at minimum current and Solar leaves it alone until the meter is back.
+      - condition: state
+        entity_id: binary_sensor.alfen_meter_ok
+        state: "on"
       # Same guard as the fuse guard above. This loop blocks itself while it
       # calls the switch script (mode: single), but a switch started elsewhere
       # -- the dashboard Force buttons, or charge_mode_apply -- would otherwise
@@ -866,11 +1060,11 @@ automation:
                   message: >-
                     {% if is_state('input_boolean.alfen_solar_keep_min','on') %}
                     Start at minimum — "keep charging at minimum" is on
-                    (surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W).
+                    (surplus {{ states('sensor.alfen_solar_surplus') | float(0) | round(0) | int }} W).
                     {% else %}
-                    Start — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
+                    Start — surplus {{ states('sensor.alfen_solar_surplus') | float(0) | round(0) | int }} W
                     held above the start threshold for
-                    {{ states('input_number.alfen_solar_hold') | round(0) }} min.
+                    {{ states('input_number.alfen_solar_hold') | float(0) | round(0) | int }} min.
                     {% endif %}
               - if:
                   - condition: template
@@ -900,9 +1094,9 @@ automation:
                   name: Alfen solar
                   entity_id: input_boolean.alfen_events
                   message: >-
-                    Stop — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
+                    Stop — surplus {{ states('sensor.alfen_solar_surplus') | float(0) | round(0) | int }} W
                     stayed below the start threshold for
-                    {{ states('input_number.alfen_solar_hold') | round(0) }} min.
+                    {{ states('input_number.alfen_solar_hold') | float(0) | round(0) | int }} min.
                     {{ 'Resetting to 1-phase.' if (phases | int == 3 and target_ph | int == 1) else '' }}
               # Leave it on 3 phases when "3-phase only" is chosen, otherwise
               # the next start would need an extra phase switch.
