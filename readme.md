@@ -1,261 +1,295 @@
-# Alfen Eve — native Modbus EV charging control for Home Assistant
+# Alfen Eve — EV charging control for Home Assistant
 
-Solar-surplus and dynamic-price control of an **Alfen Eve Pro-line (NG9xx)** EV charger over **native Modbus TCP**, driven entirely from Home Assistant. No custom integration — just the built-in `modbus` platform plus template sensors, a couple of scripts, and five automations (a Solar control loop, a keep-alive, a fuse guard, mode routing, and disconnect handling).
+Control an **Alfen Eve Pro-line or S-line (NG9xx)** charger directly from Home Assistant over Modbus TCP. Charge from your own solar surplus, charge fast when you want to, and never trip your main fuse — without any custom integration or cloud service.
 
-The charger runs in EMS/slave mode: Home Assistant is the sole brain. It writes a single current setpoint, switches between 1- and 3-phase, and keeps every phase under the fuse. Charging follows one of three modes selected from a dropdown.
+Home Assistant becomes the only brain: it tells the charger how many amps to offer and whether to use one or three phases. Everything is built from standard Home Assistant parts (the `modbus` integration, template sensors, scripts and automations), so you can read and change all of it.
 
 ---
 
 ## What it does
 
-- **Solar** — charges from genuine solar surplus only. It always starts on 1-phase, modulates the car's current to track the surplus, and switches up to 3-phase once there's enough sustained surplus to run three phases (then back down as surplus fades). Start, stop and phase changes each wait out a configurable hold, and phase switches are further capped by a cooldown, so it stays calm on a cloudy day.
-- **Fast** — 3-phase at maximum current (clamped by the car max and the fuse guard). Ignores surplus — will import from grid. Fast has no control loop of its own: the mode is applied once, and from then on the fuse guard owns every subsequent write (trim down, recover up, stop on sustained overload).
-- **Off** — pauses the car.
-- **Per-phase fuse protection** — an always-on guard that keeps every phase under your fuse rating by **adjusting** the charge current rather than cutting the car off, with configurable settle times on both directions to filter out P1 telemetry blips. It only stops outright if even 6 A no longer fits, and only after a sustained-overload timeout.
-- **Survives restarts** — the selected mode and all tuning values persist across an HA restart. Fast re-applies on boot; Solar picks back up on the next control tick.
-- Full metering, status and control surfaced as HA entities, plus a dashboard.
+You pick one of three modes on the dashboard:
+
+- **Off** — the car stays plugged in but doesn't charge.
+- **Solar** — charges only from electricity your panels would otherwise send to the grid, following the sun up and down. You choose whether it may use one phase, three phases, or switch between them automatically. When the sun gets too weak it pauses, or — if you switch on **Keep charging at minimum** — it keeps going at the lowest current and adds the sun on top.
+- **Fast** — charges as fast as the car and your fuses allow, on three phases, using grid power if needed.
+
+In every mode:
+
+- **Your fuse is protected.** The system watches how much the whole house uses on each phase and slows the car down when a phase gets close to your limit, then speeds back up when the load is gone. It only stops the car completely if even the minimum charging current no longer fits.
+- **It survives restarts.** Your mode and settings are kept when Home Assistant restarts, and charging carries on through a normal restart.
+- **Plugging in applies your mode straight away**, so the car never briefly charges at the charger's own default.
+- **Important decisions are logged**, so you can see afterwards why charging slowed down, stopped or switched phases.
 
 ---
 
-## How the Solar loop works
+## Why it is careful about lowering the current
 
-One automation (`alfen_solar`) runs every 20 s (and on entering Solar) and dispatches a single action per tick via a `choose`, so at most one setpoint write happens per tick — this is what keeps it from disturbing the car with rapid writes. It is **level-triggered**: each tick re-checks the current conditions rather than relying on a threshold-crossing edge, so it can't get stuck because a level was already crossed when a setting changed.
+Many cars briefly stop and restart charging whenever the charger **lowers** the current. Raising it causes no interruption. Frequent restarts are annoying at best, and occasionally a car doesn't come back cleanly.
 
-Durations ("surplus above X for N minutes") are measured from the `last_changed` of three threshold binary sensors (`alfen_surplus_over_start/up`, `alfen_surplus_under_down`). The branches, in priority order: start (if stopped and surplus has held), stop (if charging and surplus has fallen — resets to 1-phase as it stops), fuse-pause, phase-up 1→3, phase-down 3→1, then modulate. Phase switches use a pause→switch→resume script and are gated by a cooldown.
+So the whole system is built to lower the current rarely and deliberately, and to raise it freely. That's why there are buffers and waiting times on the way down, and why Solar ignores small dips from passing clouds. Whether your car restarts on a lowered current depends on the car — some follow the change smoothly — but the defaults assume it does.
 
-The modulate branch uses an **asymmetric deadband**, for the same reason the fuse guard does (see below): writing a *lower* current makes the car re-negotiate, writing a *higher* one does not. Raising the current still happens on a 1 A change; lowering it has to clear `alfen_solar_step_down_buffer` (suggested 2 A), so a flickering surplus doesn't force a re-negotiation on every 20 s tick. That buffer damps **surplus-driven** drops only — when the fuse headroom is what's capping the target, the deadband falls back to 1 A automatically and the car comes down immediately.
-
----
-
-## Requirements
-
-- Alfen Eve Pro-line / S-line on the **NG9xx** platform (this was built and tested on firmware **7.4.5**).
-- The **Active Load Balancing** licence on the charger (paid unlock from Alfen). Without it the Modbus slave functionality can't be enabled.
-- **ACE Service Installer** access (a service-level Alfen account) to configure the charger — see below. **Set the Modbus setpoint Validity time to 300 s** there (not the 60 s default) — this keeps charging alive across an HA restart and is EVCC's recommended value; details in the charger-configuration section.
-- A **HomeWizard P1** meter (or any P1 meter) exposing **total** and **per-phase** active power. Grid import must read positive, export negative.
-- Home Assistant with the built-in `modbus` integration, packages enabled, and the **apexcharts-card** HACS card for the dashboard graphs.
-
-### Site assumptions to adapt
-
-Two things are specific to the reference install and must be changed for another setup:
-
-- **1-phase charging happens on L1.** The per-phase headroom and fuse logic treat L1 as the phase that carries the car in 1-phase mode. If your charger uses a different phase, adjust the L1 references.
-- **P1 entity names** are `sensor.p1_meter_power` (total) and `sensor.p1_meter_power_phase_1/2/3`. Change these throughout if yours differ.
+Switching between one and three phases is different: that always needs a short pause (about 15 seconds), on every car.
 
 ---
 
-## Charger configuration (ACE Service Installer)
+## What you need
 
-All of this is set in the **ACE Service Installer** app, connected to the charger, under **Load balancing**. The Eve Manager (end-user) app cannot set most of it.
+- An **Alfen Eve Pro-line or S-line** on the **NG9xx** platform. Developed and tested on firmware **7.4.5**.
+- The **Active Load Balancing** licence on the charger (a paid option from Alfen). Without it the charger can't be controlled over Modbus.
+- Access to the **ACE Service Installer** app (an installer-level Alfen account) to change the charger settings below.
+- A **P1 smart-meter reader** (for example HomeWizard) that reports **total** power and **power per phase**, with import as a positive number and export as negative.
+- Home Assistant with **packages** enabled, and the **apexcharts-card** (from HACS) for the dashboard chart.
 
-**Active balancing:**
+### Things you may need to adapt
+
+- **Single-phase charging is assumed to use L1.** If your charger is wired so that one-phase charging uses a different phase, change the L1 references in the headroom sensors.
+- **Meter entity names** are assumed to be `sensor.p1_meter_power` (total) and `sensor.p1_meter_power_phase_1/2/3`. Change them throughout if yours are named differently.
+
+---
+
+## Charger settings (ACE Service Installer)
+
+Connect to the charger with the ACE Service Installer app and open **Load balancing**. The regular end-user app can't change most of these.
+
+**Active balancing**
 
 - Active Load Balancing — **on**
-- Data Source — **Energy Management System** (this puts the charger in slave role)
-- Safe current — the current the charger falls back to when HA stops writing for longer than the validity time. See note below.
-- Allow single-/multiphase charging — **on** *(required, or the phase register does nothing)*
-- Phase rotation — as wired (e.g. L1L2L3)
+- Data Source — **Energy Management System** (this lets Home Assistant take control)
+- Allow single-/multiphase charging — **on** (otherwise phase switching does nothing)
+- Phase rotation — as your installation is wired
+- Safe current — see below
 
-**TCP/IP EMS:**
+**TCP/IP EMS**
 
 - Mode — **Socket**
-- Validity time — **300 s** *(recommended — see below; do not leave at the 60 s default)*
+- Validity time — **300 seconds** (not the default 60)
 
-**Set the validity time to 300 s, not the 60 s default.** This is the window the charger keeps a written setpoint valid before falling back to Safe current. EVCC recommends 300 s for Alfen, and it buys two things: (1) an HA restart (which takes well under 5 min) no longer causes the charger to drop the setpoint mid-charge — charging continues across the reboot; and (2) generous margin against any write-timing jitter, so a delayed keep-alive can never trip the fallback. The keep-alive still rewrites every 30 s, now comfortably inside the window. There is no downside to 300 s for an EMS/slave setup.
+**Why 300 seconds.** Home Assistant has to repeat its instruction to the charger regularly; if it goes quiet for longer than the validity time, the charger falls back to its own *Safe current*. The system repeats it every 30 seconds, so 300 gives plenty of margin, and a normal Home Assistant restart (which takes well under five minutes) no longer interrupts charging. This is also the value evcc recommends for Alfen chargers.
 
-On firmware 7.4.5 there are **no separate "Allow reading / Allow writing maximum currents" checkboxes** — enabling Active Load Balancing with the EMS data source and Socket mode is what permits Modbus writes. On some other firmware those toggles exist (sometimes only under *Advanced Settings*); if present, both must be on.
+**Safe current** is what the charger does on its own when Home Assistant is silent for longer than the validity time — for example during a long outage. If a car is plugged in, it will charge at this current, outside all of the logic here. If you'd rather it pause in that situation, set Safe current to **0** (or the lowest value the app accepts).
 
-### Safe current
-
-Safe current is the charger's own fallback for when HA goes silent (restart, network drop, the keep-alive dying). During normal operation your setpoint drives everything and safe current is dormant. Because HA is the sole controller, a fallback should ideally be conservative — but any sane value works. Note: while a car is connected and HA is *not* writing, the charger will charge at safe current on its own, outside all HA logic.
+On firmware 7.4.5 there are no separate "Allow reading / Allow writing" checkboxes; the settings above are enough. Some other firmware versions have them (sometimes under *Advanced settings*); if yours does, turn both on.
 
 ---
 
-## Files
+## Installation
 
-- **`alfen_modbus.yaml`**: The `modbus:` read layer — every register as a sensor. Placed in `configuration.yaml` via `modbus: !include alfen_modbus.yaml`.
-- **`packages/alfen.yaml`**: The generic engine: helpers, template sensors, scripts, and the control + protection automations. Placed in the `packages/` directory.
-- **`optional_alfen_price.yaml`**: **Site-specific, not reusable.** Dynamic-price/window wiring that only selects the charge mode. Placed in the `packages/` directory.
-- **`alfen_dashboard.yaml`**: The sections-view dashboard with interactive help toggle. Placed in Lovelace dashboard config.
+The package consists of these files:
 
-To enable packages in `configuration.yaml`, add:
-`homeassistant:`
-  `packages: !include_dir_named packages`
+| File | What it is | Where it goes |
+| --- | --- | --- |
+| `alfen_modbus.yaml` | Reads every charger value as a sensor | Include from `configuration.yaml`: `modbus: !include alfen_modbus.yaml` |
+| `packages/alfen.yaml` | The control logic: settings, sensors, scripts, automations | Your `packages/` folder |
+| `alfen_dashboard.yaml` | The dashboard, with optional help text | Paste into a dashboard's raw configuration editor |
+| `optional_alfen_price.yaml` | Example of price-based charging | Optional; `packages/` folder |
 
-Set the charger's **IP** in `alfen_modbus.yaml` (`host:`). Give the charger a **static IP / DHCP reservation** — the modbus hub reads `host:` only at startup and doesn't follow a helper, so a moving IP silently breaks the connection.
+If packages aren't enabled yet, add this to `configuration.yaml`:
 
-The engine (`alfen_modbus.yaml`, `packages/alfen.yaml`, `alfen_dashboard.yaml`) is generic and portable. `optional_alfen_price.yaml` is an example of a site layer bolted on top; its only contract is **"set `input_select.alfen_charge_mode`, nothing else"** — it never writes current or phases directly, so it can't fight the engine.
+```yaml
+homeassistant:
+  packages: !include_dir_named packages
+```
 
----
+Put your charger's IP address in `alfen_modbus.yaml` (`host:`). **Give the charger a fixed IP address** (a DHCP reservation): Home Assistant only reads the address at startup, so if it changes, the connection silently stops working.
 
-## How it works
+The price file is only an example of how to add your own rules on top. It does one thing — change the charge mode — and never controls current or phases directly, so it can't conflict with the rest. Any automation of your own should follow the same rule: set `input_select.alfen_charge_mode` and nothing else.
 
-**Setpoint.** All current control is a single float32 write to register **1210** (the "Modbus Slave Max Current" setpoint). The `alfen_set_current` script packs the amps into two 16-bit words (big-endian IEEE-754, single multi-register write, as the charger requires) and records the value into `input_number.alfen_target_current`. `input_number.alfen_target_current` is therefore the single source of truth for "what did we last command", and every loop reads it rather than the charger's readback.
-
-**Keep-alive.** The setpoint falls back to Safe current if it isn't refreshed within the configured validity time (set to 300 s — see charger config). `alfen_setpoint_renew` rewrites 1210 every 30 s whenever a car is connected — far inside the window. It is a **standalone** automation (not part of the control loop) so nothing can delay it — this is what keeps the charger off its safe-current fallback.
-
-**Phase switching.** Writing `1` or `3` to register **1215** switches phases, but doing so live makes the car re-negotiate and can fault. `alfen_switch_phases` therefore does **pause → wait 10 s → write 1215 → wait 5 s → resume at min**. Both control loops refuse to run while that script is active, so nothing can write current into the pause window (see Known limitations). Expect a ~15 s charging gap on every phase change. Each switch stamps `input_datetime.alfen_last_phase_switch` (as a Unix timestamp) for the cooldown guard.
-
-**Control loop.** `alfen_solar` runs every 20 s and on entering Solar, dispatching one action per tick via a `choose`. Modulation computes the target as `min(surplus / (phases × 230), max_current, headroom)`, floored at 6 A, and writes it when the change clears the asymmetric deadband (1 A up, `alfen_solar_step_down_buffer` down). Because it re-checks every tick (level-triggered) rather than firing on a threshold-crossing edge, it can't get stuck if a level was already crossed when a setting changed.
-
-**Solar surplus.** `alfen_solar_surplus = charger_power − grid`. It is independent of the car's own draw (the car's power appears in both terms and cancels), so a running car doesn't hide the surplus. Three binary sensors flag it against the start / phase-up / phase-down thresholds; the loop measures how long each has held from its `last_changed`.
-
-**Phase decisions.** Solar always starts on **1-phase**. It switches up to 3-phase only once surplus holds above `alfen_phase_up_threshold` for the phase hold, and drops back to 1-phase when surplus holds below `alfen_phase_down_threshold`. A **cooldown** (`alfen_phase_cooldown`) caps how often a switch can happen in either direction, and a full stop resets to 1-phase so a paused charger never sits on 3-phase.
-
-**Anti-oscillation.** Configurable holds on start/stop (`alfen_solar_hold`) and on phase switches (`alfen_phase_hold`); a phase-switch cooldown (`alfen_phase_cooldown`); a scale-up cooldown after any guard action (`alfen_stop_cooldown`); asymmetric step buffers on the fuse guard (`alfen_step_down_buffer` / `alfen_step_up_buffer`) with settle times on each direction (`alfen_guard_down_settle` / `alfen_guard_up_settle`); and the asymmetric Solar modulate deadband (`alfen_solar_step_down_buffer`). Together these keep it from thrashing on a flickering cloudy day or bouncing on household loads.
-
-**Why asymmetric.** On IEC 61851 Mode 3, *reducing* the offered current makes the car re-negotiate — a handshake that briefly interrupts the draw and, on some cars, can drop the session entirely. *Raising* it does not. Every loop in this package is therefore built to make down-writes rare and deliberate, while letting up-writes happen freely. This is the single most important design constraint in the engine; any tuning that makes the system step down more eagerly trades charge stability for responsiveness.
+A full restart of Home Assistant is needed after installing or updating, because the package adds new helpers and sensors.
 
 ---
 
-## Fuse protection
+## First start — test in this order
 
-The charger's own load balancing is off (pure EMS), so keeping the main fuse safe is HA's job. It's a **soft** limit — reactive at the 20 s guard cadence, not a substitute for the physical breaker — but it prevents nuisance trips in normal operation, and rather than cutting the car off it **adjusts** the current to fit.
+Doing it step by step means that if something fails, you know which part it is.
 
-- **Per-phase headroom** (`alfen_headroom_l1/l2/l3`) = fuse rating − other house load on that phase, **clamped at the fuse rating**. `alfen_headroom_active` governs the current mode: L1 in 1-phase, tightest of the three in 3-phase. The clamp matters on a solar site: the P1 meter reports *net* phase power, so while exporting the "house load" term goes negative and the raw figure would read well above the fuse (40 A on a 24 A fuse was observed). That extra is real only while the sun holds, and the car's own draw has to fit the fuse without it, so it is never offered. The clamp can only ever lower the number.
-- **Fuse guard** (`alfen_fuse_guard`, every 20 s, **all modes**) keeps every phase under `alfen_fuse_per_phase`. When household appliances turn on, it steps the target current down. In Fast mode it is also the *only* thing that writes current after the mode is applied.
-- **Asymmetric step buffers** (`alfen_step_down_buffer` / `alfen_step_up_buffer`) decouple downward safety stepping from upward recovery. See the sizing note below — the down buffer is a safety figure, not a comfort one.
-- **Settle times on both directions** (`alfen_guard_down_settle` / `alfen_guard_up_settle`) require the trim or recover condition to hold for a configurable window before acting. These are measured from dedicated binary sensors (`alfen_guard_should_trim` / `alfen_guard_can_recover`) whose `last_changed` only moves when the *condition* crosses — **not** from the headroom sensor, which updates on every P1 poll and would reset the timer forever, silently disabling the guard.
-- **Cloud ride-through**: a headroom collapse trims to the 6 A floor and *holds* there rather than stopping. Only if headroom stays below 6 A for `alfen_critical_timeout` does it stop outright. One re-negotiation instead of a dropped session.
-- **Scale-up cooldown** (`alfen_stop_cooldown`) blocks recovery for a period after **any** guard action — a trim as well as a stop, since both stamp `input_datetime.alfen_last_guard_stop`. Deliberately conservative: it's the thing that prevents up→down→up oscillation where every "down" costs a re-negotiation.
-
-**Sizing `alfen_fuse_per_phase` and the down buffer together.** Set `alfen_fuse_per_phase` to the total per-phase current you'll allow (car + other household load on that phase), a little below your real fuse — e.g. **24 A under a 25 A fuse**. But note that the guard tolerates the car sitting up to `alfen_step_down_buffer` amps *above* that budget before it writes a lower value. With a 24 A budget under a 25 A fuse, a 1 A down buffer puts the worst case exactly at the fuse rating; a 2 A buffer puts it 1 A *over*. **Keep `alfen_step_down_buffer` at 1 A unless you have widened the gap between the budget and the real fuse.** The up buffer has no such constraint and can be larger.
+1. **Check the connection.** Load `alfen_modbus.yaml` and restart. The charger sensors should fill in: voltages around 230 V, a sensible temperature.
+2. **Check that commands arrive.** Load the package and restart. In Developer Tools, run `script.alfen_set_current` with `amps: 6`. *Setpoint readback* should show 6 and *Setpoint accounted for* should show 1. If so, Home Assistant can control the charger.
+3. **Set your fuse limit** (*Fuse per phase*) before anything else. A wrong value affects everything.
+4. **Try the modes.** Try Fast, Solar and the Force 1-Phase / 3-Phase buttons. In Fast, switch on a big appliance and watch the car slow down, then speed up again when it's off. This is deliberately not instant: slowing down waits about 40 seconds, speeding up about a minute plus a 3-minute cooldown.
+5. **Try Solar on a cloudy day.** Look at the history of *Commanded current*. Short clouds should be ignored and it should change in steady steps, not jump every 20 seconds. If it still follows every cloud, make the *Slow-down wait* longer.
+6. **Check the event log** on the dashboard. A Force-phase button press is the quickest way to create an entry.
 
 ---
 
-## Logging
+## Settings
 
-Safety-relevant decisions are written to the Home Assistant **logbook** via `logbook.log`, and the dashboard carries a logbook card showing the last 48 hours of them. The point is to be able to answer "why did the car stop / drop to 6 A at 14:20?" after the fact, without a trace or a debug log.
+Everything is adjustable from the dashboard; you never need to edit the code. Your values are kept across restarts. Each setting shows a suggested value, which is also used if a setting is ever left empty.
 
-Every entry is anchored to `input_boolean.alfen_events` — a helper that exists **only** as a logbook anchor and is never toggled. That's what lets the dashboard card show engine events and nothing else; anchoring to `input_number.alfen_target_current` instead would drown the card in that entity's own automatic state-change entries.
+### Limits
 
-**What is logged:**
+| Setting | What it does | Suggested |
+| --- | --- | --- |
+| Max current | The most the car may draw per phase. Set to what your car can handle. | 16 A |
+| Min current | The lowest current charging can run at. 6 A is the minimum every car and charger supports. | 6 A |
+| Stop current | The value sent to pause the car. Anything below 6 A pauses charging. | 5 A |
+| Fuse per phase | The most current the whole house (car plus everything else) may use on one phase. Set a little below your main fuse. | e.g. 24 A for a 25 A fuse |
+| Price fallback | The mode to return to when a cheap-price window ends (only with the price example). | Solar |
 
-| Event | Source |
+### Fuse guard
+
+The fuse guard checks every 20 seconds, in every mode — Solar included — so your fuse is protected the same way whatever mode you use.
+
+| Setting | What it does | Suggested |
+| --- | --- | --- |
+| Step-down buffer | How far over the limit before it lowers the current. **Keep this small** — see below. | 1 A |
+| Step-up buffer | How much spare room there must be before the current is raised again. Solar also never raises into this last bit of room. | 2 A |
+| Scale-down settle time | How long the house must stay over the limit before it lowers the current. Ignores short spikes like a kettle. | 40 s |
+| Scale-up settle time | How long there must be room again before it raises the current. | 60 s |
+| Scale-up cooldown | After the guard lowered or stopped charging, nothing raises or restarts it for at least this long, in Solar too. Stops a switching appliance from bouncing the car up and down. | 3 min |
+| Sustained overload timeout | If even 6 A doesn't fit, how long to wait before stopping completely. Short overloads are ridden out at 6 A. | 60 s |
+
+**The step-down buffer is a safety margin, not a comfort setting.** The car can run this many amps over *Fuse per phase* before the guard reacts. With 24 A under a 25 A fuse, a 1 A buffer means the worst case is exactly your fuse rating; 2 A would go over it. Only raise it if you've left a bigger gap between *Fuse per phase* and your real fuse.
+
+### Solar
+
+These only apply in Solar mode, and changes take effect immediately.
+
+| Setting | What it does | Suggested |
+| --- | --- | --- |
+| Solar phases | How many phases Solar may use: *Auto*, *1-phase only* or *3-phase only*. See below. | Auto |
+| Keep charging at minimum | Off: pause when the sun is too weak. On: always charge at least at the minimum (about 1.4 kW on one phase, 4.1 kW on three), plus whatever the sun adds. Fewer stops and restarts, but it **also keeps charging at night, from the grid**, until the car is full or you change mode. Still stops if the fuse can't take the minimum. | Off |
+| Start/stop hold | How long the sun must be strong enough (or too weak) before charging starts or pauses. | 3 min |
+| Solar step-down buffer | How far the sun must drop before charging slows down. Small dips are ignored. | 2 A |
+| Slow-down wait | How long the sun must stay lower before charging slows down. Clouds shorter than this are ignored completely. Longer is calmer but uses a bit more grid power. Speeding up never waits. | 60 s |
+| Phase up at *(Auto only)* | Surplus needed before moving from one to three phases. Three phases need at least about 4.1 kW, so a higher value gives a margin. | 4800 W |
+| Phase down at *(Auto only)* | Below this surplus it goes back to one phase. | 4140 W |
+| Phase switch hold *(Auto only)* | How long the surplus must stay above or below those levels before switching. | 3 min |
+| Phase switch cooldown | Minimum time between two phase switches, so it can't switch back and forth. | 12 min |
+
+#### Which phase setting to choose
+
+| Setting | Charging range* | Phase switches | Good for |
+| --- | --- | --- | --- |
+| Auto | 1.4 – 11 kW | Yes, when the sun changes enough | Most homes |
+| 1-phase only | 1.4 – 3.7 kW | Never | Smaller solar installations, or cars that dislike restarts |
+| 3-phase only | 4.1 – 11 kW | Never | Large solar installations |
+
+\* With *Max current* at 16 A. Solar starts once there's enough sun for the minimum on the chosen phases: about 1.4 kW for one phase, 4.1 kW for three.
+
+Every phase switch pauses charging for about 15 seconds, so the fixed choices are calmer. If you change the setting while the car is charging, or press a Force button in Solar mode, it moves back to the chosen phases, but not sooner than the *Phase switch cooldown* allows.
+
+**If your car doesn't like frequent restarts**, the calmest Solar setup is *Solar phases* on **1-phase only** (or **3-phase only** with a large installation) and *Keep charging at minimum* **on**. That removes every start, stop and phase switch: the car simply keeps charging and follows the sun. Remember it then also charges at night, from the grid.
+
+---
+
+## The event log
+
+The dashboard shows a 48-hour log of every decision that changed what the car may draw:
+
+- the fuse guard slowing down, speeding back up, or stopping
+- Solar starting or pausing
+- the car being unplugged or reporting a fault
+- every phase switch, including the Force buttons
+
+Normal following of the sun is **not** logged — on a cloudy day that's dozens of small changes an hour and would drown everything else. The history of *Commanded current* shows that instead. Expect roughly 10–20 entries on a normal day.
+
+---
+
+## Charging energy
+
+`sensor.alfen_energy_consumed_total_kwh` is the total energy delivered to the car, in kWh. It can be added to the Home Assistant **Energy dashboard**.
+
+This is the electricity that went from the charger into the car — what you paid for. The car loses roughly 10–15% converting it for the battery, but that happens inside the car where neither the charger nor Home Assistant can measure it.
+
+---
+
+## Good to know
+
+- **Fuse protection is a software safety net, not a replacement for your fuses.** It reacts within about a minute, and it does nothing if the smart-meter data is missing. It prevents nuisance trips; it is not a circuit breaker.
+- **Current changes in whole amps**, so each step is about 230 W on one phase or 690 W on three. That's how charging works, not a limitation of this package.
+- **Solar waits on purpose.** It needs the sun to hold for a few minutes before it starts, stops or switches phases. On a changeable day it pauses more and switches less; that's the trade-off for not constantly stopping the car. All waiting times are adjustable.
+- **A phase switch pauses charging for about 15 seconds**, and happens at most once per *Phase switch cooldown*.
+- **The charger accepts at most two Modbus connections.** If evcc or another controller is still connected, Home Assistant's commands can be refused. Use only one controller.
+- **During a long Home Assistant outage** (longer than the 300-second validity time) the charger falls back to its own Safe current and charges on its own. See *Safe current* above.
+- **If the car reports a fault** (or is unplugged) for more than 10 seconds, charging is paused. In Fast mode it resumes automatically after the fuse guard's *Scale-up settle time*; in Solar through its normal start.
+- **The car has a say too.** Some cars refuse very low currents, drop out when power changes, or won't use three phases without enough power. That can look like a problem with this package but is the car. *EV status* "Charging" means it's really drawing power; repeated switching between unplugged, error or "connected" states usually points to the cable or the car.
+- **Some units don't report every value.** Chargers with certain meters (for example the Reallin meter on newer units) leave a few total values empty. This package doesn't use those; everything it relies on — voltages, currents per phase, charger power and delivered energy — is reported by all units. Check that *Charger draw* shows a value before relying on Solar.
+- **Editing an automation in the Home Assistant UI takes it over.** If you open one of this package's automations under Settings → Automations and save it, Home Assistant stores a copy, and that copy wins from then on: changes to the package file seem to do nothing. Delete it there to hand control back to the package.
+- **First start after an upgrade:** if some settings show up empty, fill them in once from the dashboard (suggested values are shown). They're kept from then on.
+
+---
+
+## Technical details
+
+This section is for anyone changing the code.
+
+### Structure
+
+| Part | Role |
 | --- | --- |
-| Fuse guard trims the current down | `alfen_fuse_guard` — includes the headroom reading, the settle time that elapsed, and the fuse budget |
-| Fuse guard recovers upward | `alfen_fuse_guard` — Fast mode only |
-| Sustained overload stop | `alfen_fuse_guard` — headroom stayed under the floor past `alfen_critical_timeout` |
-| Solar start / stop | `alfen_solar` — with the surplus and the hold that was satisfied |
-| Solar pause on fuse floor | `alfen_solar` — headroom below 6 A, minimum charging no longer fits |
-| Phase switch 1↔3 | `alfen_switch_phases` — logged in the script, so the manual dashboard buttons are captured too |
+| `script.alfen_set_current` | The only way current is changed. Writes register 1210 (float32, two 16-bit words, big-endian) and records the value in `input_number.alfen_target_current`, which every loop treats as "what we last commanded". |
+| `script.alfen_switch_phases` | Pause (stop current) → wait 10 s → write register 1215 → wait 5 s → resume at min current. Stamps `input_datetime.alfen_last_phase_switch`. |
+| `alfen_setpoint_renew` | Keep-alive. Rewrites the current value every 30 s while a car is connected. Kept separate so nothing can delay it. |
+| `alfen_fuse_guard` | Every 20 s, all modes. The only thing that lowers or stops charging for the fuse, in every mode, so fuse behaviour is identical in Solar and Fast. Also raises again in Fast; in Fast it is the only thing that writes after the mode is applied. |
+| `alfen_solar` | Every 20 s in Solar. One `choose`, so at most one action per tick: start, stop, correct the phases (fixed phase setting), phase up / down (Auto only), follow the sun down (after the slow-down wait) or follow the sun up. |
+| `alfen_charge_mode_apply` | Applies the mode on mode change, Home Assistant start, and plug-in. |
+| `alfen_disconnect_pause` | Pauses when the car is unplugged or faulted (Mode 3 A/E/F for 10 s). |
 
-**What is deliberately not logged:** the Solar modulate loop's routine surplus tracking. On a broken-cloud day that is tens of setpoint writes an hour, and logging them would bury every entry above. The setpoint trajectory is already visible as history on `input_number.alfen_target_current`.
+The control loops are **level-triggered**: they re-check the current situation on every tick instead of reacting to a value crossing a threshold, so they can't miss a change. Durations ("surplus has been above X for N minutes") are measured from the `last_changed` of dedicated binary sensors.
 
-This means the logbook does not distinguish a Solar step-down caused by the *fuse* from one caused by the *sun* — both are silent. That attribution was deliberately left out: doing it properly needs edge detection on a continuous condition, which costs an extra automation and an extra binary sensor for a diagnostic line. If you want it, `sensor.alfen_headroom_active` against `sensor.alfen_solar_surplus` on a history chart shows the same thing. The Solar pause at the 6 A floor — the case that actually stops charging — *is* logged.
+**Solar surplus** is `charger power − net grid power`. The car's own draw appears in both terms and cancels out, so a charging car doesn't hide the surplus. The follow-the-sun target (`sensor.alfen_solar_target`) is `surplus ÷ (phases × 230)`, between min and max current, and deliberately **not** limited by fuse headroom.
 
-Expect roughly 10–20 entries on an ordinary day.
+**How Solar and the fuse guard share the work.** The guard is the only part that lowers or stops for the fuse, in every mode, with its own buffers, settle times and overload timeout. Solar only follows the sun:
 
----
+- **Down** when `binary_sensor.alfen_solar_should_lower` (the current is at least the Solar step-down buffer above the target) has been on for the slow-down wait. It lowers to the target, or to the fuse room if that's even lower, so a sun drop and a house load never cost two separate restarts.
+- **Up** straight away (raising causes no restart), but never into the last *Step-up buffer* amps of fuse room, and not during the guard's *Scale-up cooldown*. Starts also wait for that cooldown.
 
-## Metering — charging energy
+That removes the difference that used to exist: Solar reacted to a kettle within 20 seconds, while Fast waited for the guard's settle time.
 
-`sensor.alfen_energy_consumed_total_kwh` is the total energy consumed by charging, in kWh (`device_class: energy`, `state_class: total_increasing`), so it can be added to the HA **Energy dashboard** and long-term statistics. It's derived from the charger's Wh delivered-energy register (÷1000).
+**Solar phases** (`input_select.alfen_solar_phases`) sets the phase count Solar starts on and, in the fixed choices, always uses. The start threshold (`binary_sensor.alfen_surplus_over_start`) follows it: min current × 230 V on one phase, × 3 on three. The start check also uses the headroom of the phases it will start on — the tightest of all three for *3-phase only* — so it never switches to three phases only to find one of them full. Any value other than the two fixed choices is treated as *Auto*.
 
-This is **AC energy fed from the charger to the car** — i.e. what you drew and paid for. The Alfen is an AC charger, so this is the only meaningful energy figure it can report; the AC→DC conversion losses (~10–15%) happen inside the car's onboard charger, downstream of any meter the charger or HA can see, so "energy actually stored in the battery" is not obtainable here — only the car's own telemetry knows that. For cost and consumption tracking, the AC figure is the correct one. (The charger's separate `energy_consumed` register is dead on this meter and is not used.)
+**Headroom** per phase is `fuse per phase − house load on that phase`, capped at *Fuse per phase*. The cap matters when exporting: the smart meter reports *net* power, so the house load can come out negative and the raw headroom would exceed the fuse. That extra only exists while the sun holds, so it's never offered to the car. In one-phase mode L1 governs; in three-phase mode the tightest phase does.
 
----
+### Rules that must not be broken
 
-## Tunable settings (helpers)
+Each of these caused a real failure when it was broken. They're easy to break by accident because the result often looks like it works.
 
-All tuning is via `input_number` / `input_select` / `input_boolean` helpers — no YAML logic edits. None have a fixed `initial:`, so **your values persist across restarts**; each shows a suggested starting value on the dashboard, and the templates fall back to that suggestion if a helper is ever left blank.
+1. **Never compare the raw Mode 3 register.** The charger sends the state as a 10-byte text value, so "unplugged" arrives as `A` plus nine padding characters and never equals `'A'`. Any "is a car connected?" check against `sensor.alfen_mode3_state` is always true. Always use the cleaned `sensor.alfen_mode3`. You can see the padding in Developer Tools → Template: `{{ states('sensor.alfen_mode3_state') | length }}` returns 10.
 
-- **`alfen_max_current`**: Car's charge-rate ceiling per phase (suggested: 16 A).
-- **`alfen_min_current`**: The 6 A IEC floor; never charges below this (suggested: 6 A).
-- **`alfen_stop_current`**: The "off" value written to pause, below 6 A (suggested: 5 A).
-- **`alfen_fuse_per_phase`**: Total per-phase current cap for car + house (suggested: 24 A).
+2. **Never write current while a phase switch is running.** The switch script lowers the current and holds it for 10 seconds so the phases change with no load. A loop that sees that low value will think there's room and raise it again — into the middle of the pause. The charger then won't switch and stays on the old number of phases. The fuse guard and Solar loop therefore only run while `script.alfen_switch_phases` is `off`. The keep-alive is the exception: it only repeats the current value, which during a switch is the pause value.
 
-**Fuse guard tuning**
+3. **Nothing that switches phases may be triggered by Mode 3 changes — except plugging in.** A phase switch itself changes Mode 3 (charging → connected → charging). An automation with `mode: restart` that both triggers on Mode 3 and calls the switch script will restart itself in the middle of the switch; because the script is called as a service it is part of that run and gets cancelled too. `alfen_charge_mode_apply` therefore only triggers on Mode 3 leaving `A` (plug-in), which a phase switch never causes. Everything else Mode-3-related lives in `alfen_disconnect_pause`, which never switches phases.
 
-- **`alfen_step_down_buffer`**: Minimum drop before the guard writes a lower current. **Safety-critical — see the sizing note under Fuse protection** (suggested: 1 A).
-- **`alfen_step_up_buffer`**: Minimum headroom above the current setpoint before recovering upward (suggested: 2 A).
-- **`alfen_guard_down_settle`**: Seconds the trim condition must hold before stepping down (suggested: 40 s).
-- **`alfen_guard_up_settle`**: Seconds the recover condition must hold before stepping up (suggested: 60 s).
-- **`alfen_stop_cooldown`**: Minutes after any guard trim or stop before recovery may ramp up (suggested: 3 min).
-- **`alfen_critical_timeout`**: Seconds headroom must stay below 6 A before a full stop. Shorter = stops sooner on real overload; longer = rides through more clouds (suggested: 60 s).
+4. **Never measure a waiting time from a sensor that changes constantly.** If a settle time is measured from the `last_changed` of the headroom sensor, the timer restarts on every meter update and never completes, so the guard never acts, although it looks correctly configured. Measure from a binary sensor that only changes when the condition itself flips (`alfen_guard_should_trim`, `alfen_guard_can_recover`, `alfen_solar_should_lower`).
 
-**Solar tuning**
+5. **Never read time from an `input_datetime` state string.** It's local time without a time zone and gets read as UTC, which shifts cooldowns by hours. Store with `now().timestamp()` and read with `state_attr(..., 'timestamp')`.
 
-- **`alfen_phase_up_threshold`**: Surplus in Watts needed to switch from 1→3 phase (suggested: 4800 W).
-- **`alfen_phase_down_threshold`**: Surplus in Watts needed to switch from 3→1 phase (suggested: 4140 W).
-- **`alfen_phase_cooldown`**: Minutes blocking any further phase switch (suggested: 12 min).
-- **`alfen_solar_hold`**: Minutes surplus must hold before start/stop (suggested: 3 min).
-- **`alfen_phase_hold`**: Minutes surplus must hold before a phase switch (suggested: 3 min).
-- **`alfen_solar_step_down_buffer`**: How far the surplus target must fall below the commanded current before Solar writes a lower value. Purely anti-churn, not safety — headroom-driven drops bypass it (suggested: 2 A).
+6. **Don't make the fuse guard tick faster than the smart meter updates.** It would act several times on the same outdated reading. A 20-second tick suits a meter that updates about every 10 seconds. With a faster meter you can lower it, together with the scale-down settle time.
 
-**Other**
+### Logging
 
-- **`alfen_dashboard_show_help`**: Boolean to toggle dashboard explanation cards on/off (suggested: Off).
-- **`alfen_events`**: Boolean used **only** as the logbook anchor for engine safety events — see Logging. Never toggle it; nothing reads its state.
-- **`alfen_charge_mode`**: Off / Solar / Fast.
-- **`alfen_price_fallback`**: Mode entered when a price window closes (suggested: Solar).
+Every log entry is attached to `input_boolean.alfen_events`, a helper that is never switched and exists only for this. That's what lets the dashboard's log card show these events and nothing else. The one decision that is deliberately not logged is Solar following the surplus.
 
-Two `input_datetime` helpers hold timestamps for the cooldowns and are written by the engine, not by you: `alfen_last_phase_switch` and `alfen_last_guard_stop`. Both are stamped as Unix timestamps via `now().timestamp()` and read back with `state_attr(..., 'timestamp')` — never parsed from the state string, which is naive local time and will read as UTC.
+### Register reference
 
----
+Slave **200** = station, slave **1** = socket. All values big-endian, no word swap.
 
-## Register reference
+| Register | Content | Type | Access |
+| --- | --- | --- | --- |
+| 1100–1101 | Station active max current (hard ceiling) | float32 | read |
+| 1102–1103 | Board temperature | float32 | read |
+| 1201–1205 | Mode 3 state A–F (padded text — see rule 1) | string | read |
+| 1206–1207 | Actual applied max current | float32 | read |
+| 1208–1209 | Setpoint remaining valid time | uint32 | read |
+| **1210–1211** | **Max current setpoint** | float32 | **read/write** |
+| 1212–1213 | Safe current | float32 | read |
+| 1214 | Setpoint accounted for (1 = charger is using it) | uint16 | read |
+| **1215** | **Number of phases, 1 or 3** | uint16 | **read/write** |
+| 306–336 | Voltage, current, power factor, frequency per phase | float32 | read |
+| 374 / 390 | Energy delivered / consumed | float64 | read |
 
-Slave **200** = station; slave **1** = socket. All values big-endian, no word swap.
-
-- **1100–1101**: Station Active Max Current, hard ceiling (float32, Read-only)
-- **1102–1103**: Board temperature (float32, Read-only)
-- **1201–1205**: Mode 3 state, IEC 61851 A/B/C/D/E/F (string, Read-only)
-- **1206–1207**: Actual Applied Max Current (float32, Read-only)
-- **1208–1209**: Setpoint remaining valid time (uint32, Read-only)
-- **1210–1211**: **Modbus Slave Max Current setpoint** (float32, Read/Write)
-- **1212–1213**: Active Load Balancing safe current (float32, Read-only)
-- **1214**: Setpoint accounted for, 1 = charger is using it (uint16, Read-only)
-- **1215**: **Charge using 1 or 3 phases** (uint16, Read/Write)
-- **306–336**: Per-phase voltage, current, power factor, frequency (float32, Read-only)
-- **374 / 390**: Real energy delivered / consumed sum (float64, Read-only)
-
-`sensor.alfen_setpoint_accounted_for` (1214) is the definitive "are my writes landing" check: **1** means the charger is using your setpoint.
+`sensor.alfen_setpoint_accounted_for` (1214) is the quickest check that commands are arriving: **1** means the charger is using Home Assistant's value.
 
 ---
 
-## Bring-up / testing order
+## Disclaimer
 
-Do this in order so a failure points at one layer:
-
-1. Set the real charger IP in `alfen_modbus.yaml`, load it, restart HA. Confirm sensors populate — voltages near 230 V, temperature sane.
-2. Load `packages/alfen.yaml`. In Developer Tools call `script.alfen_set_current` with `amps: 6` and watch `sensor.alfen_setpoint_readback` → 6 and `sensor.alfen_setpoint_accounted_for` → 1. That validates the whole write path.
-3. **Set `alfen_fuse_per_phase` to your real safe rating** before anything else — a wrong (too-low) value clamps or trips everything.
-4. Try **Solar** and **Fast**, and the Force-phase buttons; in Fast, add a household load on a phase and confirm the fuse guard trims the car and recovers when it clears. Remember the trim waits out `alfen_guard_down_settle` (40 s) and the recovery waits out both `alfen_guard_up_settle` (60 s) and `alfen_stop_cooldown` (3 min) — nothing is wrong if it doesn't react instantly.
-5. In **Solar** on a broken-cloud day, watch `input_number.alfen_target_current` in the history graph. It should step down in meaningful jumps, not sawtooth every 20 s. If it still chases the surplus, raise `alfen_solar_step_down_buffer` from 2 A to 3 A.
-6. Load the dashboard; confirm the **Safety Event Log** card fills in as you exercise steps 4–5 (a phase switch via the Force buttons is the quickest way to produce an entry). Wire the price layer last.
-
----
-
-## Known limitations & gotchas
-
-- **Reallin meter (post-2021 units)** only expose a subset of measurement registers over Modbus; several aggregate registers read NaN / never populate. On this build, `alfen_current_sum` and `alfen_energy_consumed_sum` are dead and are not used. Voltages, per-phase current, charger power, and **energy delivered** all report fine — and energy delivered is what matters (see Metering below). Verify `sensor.alfen_power_sum` reports before relying on Solar.
-- **Integer-amp control** — the setpoint steps in whole amps, so ~230 W (1-phase) or ~690 W (3-phase) of granularity per step is unavoidable. Inherent to amp-stepped charging, not a bug.
-- **Solar has holds by design** — surplus must hold above the start threshold for the start/stop hold before charging begins (and below it before stopping), and above the phase-up threshold for the phase hold before going 3-phase. On a marginal day it pauses more and switches less; that's the trade-off for not thrashing. All holds are tunable.
-- **Guard cadence vs. meter update rate.** `alfen_fuse_guard` ticks every 20 s (`seconds: "/20"`), matched to a P1 meter that updates roughly every 10 s. **Do not set the tick faster than your meter updates** — the guard would act repeatedly on the same stale reading. If your meter updates every second and you want faster reaction to household loads, lower the trigger to `/5` and shorten `alfen_guard_down_settle` to match; the settle time, not the tick, is what filters transient drops.
-- **Settle times must never be measured from a continuously-updating sensor.** If a settle check is written against `states.sensor.alfen_headroom_active.last_changed`, the timer resets on every P1 poll and the condition can never mature — the guard goes permanently silent while appearing correctly configured. This actually happened during development: a 15 s settle time left a 15.2 A setpoint standing for 11 minutes against 8.3 A of headroom. The dedicated `alfen_guard_should_trim` / `alfen_guard_can_recover` binary sensors exist precisely to give the timers a `last_changed` that only moves on a condition crossing.
-- **Never compare the raw Mode 3 register.** The state arrives as a 10-byte string (registers 1201–1205), so an unplugged charger reads as `A` plus nine padding bytes and `sensor.alfen_mode3_state` never equals `'A'`. Every "is a car connected?" check written against the raw sensor is silently always-true — the guard, the Solar loop and the keep-alive run with no car, and disconnect handling never fires. Everything in this package reads the cleaned `sensor.alfen_mode3` instead, which strips the padding and goes `unavailable` when the read fails. Quick check in Developer Tools → Template: `{{ states('sensor.alfen_mode3_state') | length }}` returns 10, not 1. Until this was found, every check against the raw value had been always-true since the package was first written, and nothing showed it: with a car plugged in, an always-open check behaves exactly like a working one.
-- **Nothing that calls `alfen_switch_phases` may be triggered by the Mode 3 state — except a plug-in.** The switch script pauses the car for 10 s, which itself changes Mode 3 (C2 → B1/B2). `alfen_charge_mode_apply` used to trigger on `sensor.alfen_mode3_state` with `mode: restart`, so that pause re-triggered the automation, which cancelled its own in-flight run — and since the script is called as a service it is a *child* of that run, so it died at the delay and register 1215 was never written. Fast mode would log a phase switch and silently stay on 1 phase. Solar was never affected, because `alfen_solar` calls the same script and is not triggered by mode3. Disconnect handling is therefore split into `alfen_disconnect_pause`, which only ever writes stop current and so is safe to restart. The one Mode 3 trigger `alfen_charge_mode_apply` keeps is `from: "A"` — the car being plugged in — which a phase switch can never produce, because it moves Mode 3 between C and B.
-- **Plug-in applies the mode immediately.** While no car is connected the keep-alive is idle, so the charger's setpoint expires and it falls back to Safe current. Without the plug-in trigger a newly connected car would charge at Safe current, whatever mode is selected — Off included — until the keep-alive's next tick up to 30 s later. On plug-in: Off pauses, Solar holds the car paused until the Solar loop starts it, and Fast switches to 3-phase and goes to max.
-- **Disconnect and fault pause after 10 s.** `alfen_disconnect_pause` fires on Mode 3 A, E or F held for 10 s, so a single bad poll can't pause the car. A failed Modbus *read* (unknown/unavailable) deliberately does not trigger it. After a transient E/F, Fast recovers through the fuse guard's recovery branch (after `alfen_guard_up_settle`), and Solar through its start hold.
-- **Nothing may write current during a phase switch.** `alfen_switch_phases` drops the setpoint to `stop_current` and holds it for 10 s so the contactor changes under no load. Both control loops (`alfen_fuse_guard` and `alfen_solar`) carry a `script.alfen_switch_phases` is `off` condition for this reason. Without it the fuse guard sees the deliberately-low setpoint, concludes headroom has recovered, and writes max current back *into* the pause — the phase register is then written while the car is drawing full current and the charger silently refuses to switch, leaving you stuck on the old phase count. This was observed live: a switch logged at 15:42:18 and a guard recovery to 16 A at 15:42:20. The keep-alive (`alfen_setpoint_renew`) is deliberately *not* gated — it rewrites whatever the current target is, which during a pause is the pause value, and it must keep running to hold off the validity timeout.
-- **Automations edited in the HA UI override the package.** An automation from `packages/alfen.yaml` that you then open and save in Settings → Automations is copied into `automations.yaml`, and that copy wins from then on — edits to the package file will appear to do nothing. Delete it from Settings → Automations to hand control back to the package.
-- **After an HA restart**, the selected mode and all tuning values are restored (no helper has a fixed `initial:`, so HA restores the last value). Fast re-applies on boot; Solar resumes on the next 20 s control tick if there's surplus. *On the very first reload after removing the `initial:` values, the helpers may be blank — set them once from the dashboard (suggested values are shown inline) and they persist thereafter.*
-- **Autonomous charging during an HA outage** — while HA is *down* longer than the setpoint validity window (300 s), the charger falls back to **Safe current** and charges on its own, outside all HA logic. The 300 s window means a normal HA restart rides through without a fallback; only a genuine multi-minute outage triggers it. Nothing in HA can prevent it while HA is down; the only fix is to set **Safe current to 0** (or the lowest accepted) in the Service Installer, so the fallback pauses instead of charging.
-- **Phase switches cost ~15 s** of charging each (the pause-switch-resume), and are capped to at most one per `alfen_phase_cooldown` in either direction.
-- **2 Modbus TCP connections max** — if EVCC or another master is still connected, HA's writes can be refused for lack of a slot. Run only HA against the charger.
-- **Fuse protection is soft** — reactive at the 20 s guard cadence, and it fails *open* (does nothing) if P1 data is missing. It reduces nuisance trips; it is not the breaker.
-- **The car is a second controller.** Some EVs refuse to charge at low currents, drop the pilot (Mode 3 → B1/E/F), or won't hold 3-phase without enough power — behaviour that can look like a control bug but is car-side. Mode 3 = C means it's actually drawing; A/E/F or B1 flapping points at the cable or car, not the integration.
-
----
-
-## Disclaimer & Disclaimer of Liability
-
-> **USE AT YOUR OWN RISK.**  
-> This software interacts directly with high-voltage electrical hardware (EV charger) and main household electrical infrastructure. It is provided strictly as-is for educational and personal automation purposes. 
-> 
-> - The author(s) assume **no responsibility or liability** for any damage to your EV charger, electrical vehicle, main fuses, household wiring, software installation, or property.
-> - Always verify that your physical safety devices (fuses, circuit breakers, residual current devices) are properly installed by a qualified electrician. Soft automation safety limits (such as the software fuse guard in this package) are reactive and are **not a substitute for hardware circuit protection**.
+> **USE AT YOUR OWN RISK.**
+> This software controls high-voltage electrical equipment (an EV charger) and interacts with your household electrical installation. It is provided as-is, for personal automation and educational purposes.
+>
+> - The authors accept **no responsibility or liability** for any damage to your charger, vehicle, fuses, wiring, software or property.
+> - Make sure your physical protection (fuses, circuit breakers, residual-current devices) is installed correctly by a qualified electrician. Software limits such as the fuse guard in this package react after the fact and are **not a substitute for hardware protection**.
 
 ---
 

@@ -106,6 +106,16 @@ input_number:
     step: 1
     mode: box
     unit_of_measurement: A
+  # Solar-only: how long the sun must stay lower before Solar lowers the
+  # current. Filters out short clouds. Measured from a binary sensor, so the
+  # timer only restarts when the condition itself flips.
+  alfen_solar_down_settle:
+    name: Alfen solar slow-down wait
+    min: 0
+    max: 300
+    step: 5
+    mode: box
+    unit_of_measurement: s
   alfen_critical_timeout:
     name: Alfen sustained overload timeout
     min: 20
@@ -150,11 +160,26 @@ input_select:
     options:
       - "Off"
       - "Solar"
+  # How many phases Solar may use. Auto switches between 1 and 3 on the
+  # surplus thresholds; the fixed choices never switch. Anything else (e.g. the
+  # helper not restored yet on first start) is treated as Auto.
+  alfen_solar_phases:
+    name: Alfen solar phases
+    options:
+      - "Auto"
+      - "1-phase only"
+      - "3-phase only"
 
 input_boolean:
   alfen_dashboard_show_help:
     name: Show EV Charger Help
     icon: mdi:help-circle-outline
+  # Solar option: never pause for lack of sun. Charges at minimum current
+  # (6 A) as a floor and adds any surplus on top. Fewer stops/starts, at the
+  # cost of some grid import when the sun is weak.
+  alfen_solar_keep_min:
+    name: "Solar: keep charging at minimum"
+    icon: mdi:weather-partly-cloudy
   # Logbook anchor ONLY. Never toggled by anything. Every logbook.log call in
   # this package attaches its entry to this entity, so the dashboard's logbook
   # card can show exactly the engine's safety events and nothing else -- routine
@@ -167,11 +192,14 @@ template:
   - binary_sensor:
       # Surplus threshold flags. last_changed lets the control loop measure how long
       # a condition has held (level-triggered, no missed edges).
+      # Start threshold = minimum current on the phases Solar will start on:
+      # ~1.4 kW on one phase, ~4.1 kW when "3-phase only" is chosen.
       - name: alfen_surplus_over_start
         unique_id: alfen_surplus_over_start
         state: >
+          {% set n = 3 if is_state('input_select.alfen_solar_phases','3-phase only') else 1 %}
           {{ states('sensor.alfen_solar_surplus') | float(0)
-             >= states('input_number.alfen_min_current') | float(6) * 230 }}
+             >= states('input_number.alfen_min_current') | float(6) * 230 * n }}
       - name: alfen_surplus_over_up
         unique_id: alfen_surplus_over_up
         state: >
@@ -194,6 +222,17 @@ template:
           {% set cur = states('input_number.alfen_target_current') | float(0) %}
           {% set buf = states('input_number.alfen_step_down_buffer') | float(1) %}
           {{ head < (cur - buf) and cur >= states('input_number.alfen_min_current') | float(6) }}
+      # Solar: has the sun dropped far enough below what we're charging at to
+      # justify lowering the current? Its last_changed times the Solar
+      # slow-down wait. Sun only -- fuse-driven lowering is the guard's job.
+      - name: alfen_solar_should_lower
+        unique_id: alfen_solar_should_lower
+        state: >
+          {% set cur = states('input_number.alfen_target_current') | float(0) %}
+          {% set t = states('sensor.alfen_solar_target') | float(0) %}
+          {% set buf = states('input_number.alfen_solar_step_down_buffer') | float(2) %}
+          {{ cur >= states('input_number.alfen_min_current') | float(6)
+             and (cur - t) >= buf }}
       - name: alfen_guard_can_recover
         unique_id: alfen_guard_can_recover
         state: >
@@ -249,6 +288,21 @@ template:
           {{ (states('sensor.alfen_power_sum') | float(0))
              - (states('sensor.p1_meter_power') | float(0)) }}
 
+      # What the sun alone would support, per phase, on the current phase count:
+      # surplus / (phases x 230), between min and max current. Deliberately NOT
+      # limited by fuse headroom -- the fuse guard handles that in every mode.
+      - name: alfen_solar_target
+        unique_id: alfen_solar_target
+        unit_of_measurement: A
+        icon: mdi:solar-power-variant
+        state: >
+          {% set ph = states('sensor.alfen_phases') | int(1) %}
+          {% set ph = ph if ph in [1,3] else 1 %}
+          {% set minc = states('input_number.alfen_min_current') | float(6) %}
+          {% set maxc = states('input_number.alfen_max_current') | float(16) %}
+          {% set raw = (states('sensor.alfen_solar_surplus') | float(0)) / (ph * 230) %}
+          {{ ([ [ raw, maxc ] | min, minc ] | max) | round(0) }}
+
       - name: alfen_headroom_l1
         unique_id: alfen_headroom_l1
         unit_of_measurement: A
@@ -261,7 +315,7 @@ template:
           {% set house = (states('sensor.p1_meter_power_phase_1') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
-              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              well above the cap. That credit is real only
               while the sun holds, and the car's own draw must fit the fuse on
               its own. -#}
           {{ ([ fuse - house, fuse ] | min) | round(1) }}
@@ -277,7 +331,7 @@ template:
           {% set house = (states('sensor.p1_meter_power_phase_2') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
-              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              well above the cap. That credit is real only
               while the sun holds, and the car's own draw must fit the fuse on
               its own. -#}
           {{ ([ fuse - house, fuse ] | min) | round(1) }}
@@ -293,7 +347,7 @@ template:
           {% set house = (states('sensor.p1_meter_power_phase_3') | float(0)) / v - car %}
           {#- Clamp at the fuse rating. While exporting, net phase power is
               negative, so 'house' goes negative and headroom would read well
-              above the cap (e.g. 40 A on a 24 A fuse). That credit is real only
+              well above the cap. That credit is real only
               while the sun holds, and the car's own draw must fit the fuse on
               its own. -#}
           {{ ([ fuse - house, fuse ] | min) | round(1) }}
@@ -315,7 +369,7 @@ template:
           {% endif %}
 
       # Total AC energy consumed by charging, in kWh (for display + Energy dashboard).
-      # (energy_consumed_sum is not populated on this meter; this is derived from the
+      # (energy_consumed_sum is not populated on some meters; this is derived from the
       #  charger's delivered-energy register, which is the AC energy fed to the car.)
       - name: alfen_energy_consumed_total_kwh
         unique_id: alfen_energy_consumed_total_kwh
@@ -523,7 +577,10 @@ automation:
           #    Cloud = clamp to 6A floor, not stop.
           - conditions:
               - condition: template
-                value_template: "{{ charging and down_settled }}"
+                # ...and only if that actually lowers the current. Once at the
+                # 6 A floor, repeating the same trim every tick would just be a
+                # pointless write and a duplicate log line; branch 1 takes over.
+                value_template: "{{ charging and down_settled and (safe | float) < (cur | float) }}"
             sequence:
               - service: logbook.log
                 data:
@@ -719,6 +776,23 @@ automation:
           head: "{{ states('sensor.alfen_headroom_active') | float(99) }}"
           cur: "{{ states('input_number.alfen_target_current') | float(0) }}"
           phases: "{{ states('sensor.alfen_phases') | int(1) }}"
+          # Solar phases setting. ph_auto: the thresholds decide. target_ph: the
+          # phase count Solar starts on (and, in a fixed mode, always uses).
+          ph_auto: >
+            {{ states('input_select.alfen_solar_phases') not in ['1-phase only','3-phase only'] }}
+          target_ph: >
+            {{ 3 if is_state('input_select.alfen_solar_phases','3-phase only') else 1 }}
+          # Headroom on the phases Solar would START on: L1 for one phase, the
+          # tightest of the three for three phases. (sensor.alfen_headroom_active
+          # follows the CURRENT phase count, which may differ before a start.)
+          start_head: >
+            {% if is_state('input_select.alfen_solar_phases','3-phase only') %}
+            {{ [ states('sensor.alfen_headroom_l1') | float(99),
+                 states('sensor.alfen_headroom_l2') | float(99),
+                 states('sensor.alfen_headroom_l3') | float(99) ] | min }}
+            {% else %}
+            {{ states('sensor.alfen_headroom_l1') | float(99) }}
+            {% endif %}
           charging: >
             {{ states('input_number.alfen_target_current') | float(0)
                >= states('input_number.alfen_min_current') | float(6) }}
@@ -744,70 +818,82 @@ automation:
             {% set cd = states('input_number.alfen_phase_cooldown') | float(12) * 60 %}
             {{ true if last is none
                else (now().timestamp() - (last | float(0))) > cd }}
-          # Deadband a DOWN-write must clear (see branch 6). Normally the Solar
-          # anti-churn buffer, but 1 A when the FUSE HEADROOM is what is capping
-          # the target -- a safety-driven drop is never damped. Resolved to a
-          # number inside one template so no boolean round-trips through HA.
-          # What is actually capping the target right now: the fuse headroom, or
-          # the available surplus? A string, not a bool, so it can be compared by
-          # equality without depending on HA's native-type rendering.
-          cap_reason: >
-            {% set ph = states('sensor.alfen_phases') | int(1) %}
-            {% set ph = ph if ph in [1,3] else 1 %}
-            {% set surplus_amps = (states('sensor.alfen_solar_surplus') | float(0)) / (ph * 230) %}
-            {% set maxc = states('input_number.alfen_max_current') | float(16) %}
-            {% set head = states('sensor.alfen_headroom_active') | float(99) %}
-            {{ 'fuse' if head < ([ surplus_amps, maxc ] | min) else 'surplus' }}
-          down_gate: >
-            {% if cap_reason == 'fuse' %}
-            {{ 1 }}
-            {% else %}
-            {{ states('input_number.alfen_solar_step_down_buffer') | float(2) }}
-            {% endif %}
-          newt: >
-            {% set surplus = states('sensor.alfen_solar_surplus') | float(0) %}
-            {% set ph = states('sensor.alfen_phases') | int(1) %}
-            {% set ph = ph if ph in [1,3] else 1 %}
-            {% set v = 230 %}
+          # Same cooldown the fuse guard uses before raising: after the guard has
+          # lowered or stopped charging, Solar doesn't raise or restart either.
+          stop_cooldown_ok: >
+            {% set last = state_attr('input_datetime.alfen_last_guard_stop','timestamp') %}
+            {% set cd = states('input_number.alfen_stop_cooldown') | float(3) * 60 %}
+            {{ true if last is none
+               else (now().timestamp() - (last | float(0))) > cd }}
+          # RAISE toward the sun, but never into the last step-up-buffer amps of
+          # fuse room -- the same margin the guard keeps before recovering.
+          raise_to: >
+            {% set room = (states('sensor.alfen_headroom_active') | float(99))
+                          - (states('input_number.alfen_step_up_buffer') | float(2)) %}
+            {{ [ states('sensor.alfen_solar_target') | float(0),
+                 room | round(0, 'floor') ] | min }}
+          # LOWER only once the sun has stayed lower for the slow-down wait.
+          lower_settled: >
+            {% set settle = states('input_number.alfen_solar_down_settle') | float(60) %}
+            {{ is_state('binary_sensor.alfen_solar_should_lower','on')
+               and (as_timestamp(now()) - as_timestamp(states.binary_sensor.alfen_solar_should_lower.last_changed))
+                   >= settle }}
+          # When lowering anyway, don't go above the fuse room either, so a sun
+          # drop and a house load don't cost two separate restarts.
+          lower_to: >
             {% set minc = states('input_number.alfen_min_current') | float(6) %}
-            {% set maxc = states('input_number.alfen_max_current') | float(16) %}
             {% set head = states('sensor.alfen_headroom_active') | float(99) %}
-            {% set raw = surplus / (ph * v) %}
-            {% set capped = [ raw, maxc, head ] | min %}
-            {{ ([ capped, minc ] | max) | round(0) }}
+            {{ [ [ states('sensor.alfen_solar_target') | float(0),
+                   head | round(0, 'floor') ] | min, minc ] | max }}
       - choose:
-          # 1) Not charging, but surplus has held above start for the hold window
-          #    -> start. Always ensure 1-phase first (option 2).
+          # 1) Not charging -> start, when EITHER surplus has held above the start
+          #    threshold for the hold window, OR "keep charging at minimum" is on.
+          #    Never start if the fuse can't fit minimum current (the guard would
+          #    stop it again), nor within the guard's cooldown after it stepped in.
+          #    Starts on 1 phase, or 3 when "3-phase only" is chosen.
           - conditions:
               - condition: template
-                value_template: "{{ not charging and start_held }}"
+                value_template: >
+                  {{ not charging
+                     and (start_held or is_state('input_boolean.alfen_solar_keep_min','on'))
+                     and (start_head | float >= minc | float)
+                     and stop_cooldown_ok }}
             sequence:
               - service: logbook.log
                 data:
                   name: Alfen solar
                   entity_id: input_boolean.alfen_events
                   message: >-
+                    {% if is_state('input_boolean.alfen_solar_keep_min','on') %}
+                    Start at minimum — "keep charging at minimum" is on
+                    (surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W).
+                    {% else %}
                     Start — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
                     held above the start threshold for
                     {{ states('input_number.alfen_solar_hold') | round(0) }} min.
+                    {% endif %}
               - if:
                   - condition: template
-                    value_template: "{{ phases != 1 }}"
+                    value_template: "{{ phases | int != target_ph | int }}"
                 then:
                   - service: script.alfen_switch_phases
                     data:
-                      phases: 1
+                      phases: "{{ target_ph | int }}"
                 else:
                   - service: script.alfen_set_current
                     data:
                       amps: "{{ minc }}"
 
           # 2) Charging, but surplus has held below start for the hold window -> stop.
-          #    If we were on 3-phase, drop back to 1-phase so a paused charger never
-          #    sits on 3-phase (the next start always begins on 1-phase anyway).
+          #    Skipped entirely when "keep charging at minimum" is on: the car then
+          #    stays at 6 A (modulation never goes below min) instead of pausing.
+          #    Unless "3-phase only" is chosen, drop back to 1-phase so the next
+          #    start doesn't need a phase switch.
           - conditions:
               - condition: template
-                value_template: "{{ charging and stop_held }}"
+                value_template: >
+                  {{ charging and stop_held
+                     and not is_state('input_boolean.alfen_solar_keep_min','on') }}
             sequence:
               - service: logbook.log
                 data:
@@ -817,10 +903,12 @@ automation:
                     Stop — surplus {{ states('sensor.alfen_solar_surplus') | round(0) }} W
                     stayed below the start threshold for
                     {{ states('input_number.alfen_solar_hold') | round(0) }} min.
-                    {{ 'Resetting to 1-phase.' if phases == 3 else '' }}
+                    {{ 'Resetting to 1-phase.' if (phases | int == 3 and target_ph | int == 1) else '' }}
+              # Leave it on 3 phases when "3-phase only" is chosen, otherwise
+              # the next start would need an extra phase switch.
               - if:
                   - condition: template
-                    value_template: "{{ phases == 3 }}"
+                    value_template: "{{ phases | int == 3 and target_ph | int == 1 }}"
                 then:
                   - service: script.alfen_set_phases
                     data:
@@ -829,67 +917,67 @@ automation:
                 data:
                   amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
 
-          # 3) Charging, headroom below floor -> pause (fuse can't fit 6 A).
-          - conditions:
-              - condition: template
-                value_template: "{{ charging and (head | float < minc | float) }}"
-            sequence:
-              - service: logbook.log
-                data:
-                  name: Alfen solar
-                  entity_id: input_boolean.alfen_events
-                  message: >-
-                    PAUSE — fuse headroom {{ head }} A is below the
-                    {{ minc | round(0) }} A floor, so even minimum charging no longer
-                    fits on the tightest phase. Was charging at {{ cur | round(0) }} A.
-              - service: script.alfen_set_current
-                data:
-                  amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
+          # (No fuse pause here. The fuse guard lowers, rides out and stops for the
+          #  fuse in every mode, with its own buffers, settle times and timeout,
+          #  so fuse behaviour is identical in Solar and Fast.)
 
-          # 4) Charging on 1-phase, surplus held above up-threshold, cooldown ok -> 3-phase.
+          # 3b) Fixed phase mode, but charging on the other phase count (the
+          #     setting was changed mid-charge, or a Force button was used) ->
+          #     move to the chosen phases, respecting the phase cooldown.
           - conditions:
               - condition: template
-                value_template: "{{ charging and phases == 1 and up_held and cooldown_ok }}"
+                value_template: >
+                  {{ charging and not ph_auto
+                     and phases | int != target_ph | int and cooldown_ok }}
+            sequence:
+              - service: script.alfen_switch_phases
+                data:
+                  phases: "{{ target_ph | int }}"
+
+          # 4) Auto only: charging on 1-phase, surplus held above up-threshold,
+          #    cooldown ok -> 3-phase.
+          - conditions:
+              - condition: template
+                value_template: "{{ charging and ph_auto and phases == 1 and up_held and cooldown_ok }}"
             sequence:
               - service: script.alfen_switch_phases
                 data:
                   phases: 3
 
-          # 5) Charging on 3-phase, surplus held below down-threshold, cooldown ok -> 1-phase.
+          # 5) Auto only: charging on 3-phase, surplus held below down-threshold,
+          #    cooldown ok -> 1-phase.
           - conditions:
               - condition: template
-                value_template: "{{ charging and phases == 3 and down_held and cooldown_ok }}"
+                value_template: "{{ charging and ph_auto and phases == 3 and down_held and cooldown_ok }}"
             sequence:
               - service: script.alfen_switch_phases
                 data:
                   phases: 1
 
-          # 6) Charging -> modulate toward the surplus target.
-          #    ASYMMETRIC deadband, same principle as the fuse guard: writing a
-          #    LOWER current makes the car re-negotiate (expensive, can drop the
-          #    session); writing a HIGHER one does not. So:
-          #      up   -> write on the normal 1 A deadband
-          #      down -> write only once surplus has fallen by the Solar
-          #              step-down buffer, so passing clouds don't trigger a
-          #              re-negotiation on every 20 s tick.
-          #    Safety exception: the buffer only damps SURPLUS-driven drops. If
-          #    the fuse headroom is what is capping the target, down_gate falls
-          #    back to 1 A so the car still comes down at once.
-          #    Branch 3 above still pauses outright if 6 A no longer fits.
+          # 6) Follow the sun DOWN -- only after the slow-down wait, and only by
+          #    at least the Solar step-down buffer (see alfen_solar_should_lower).
+          #    Lowering makes many cars restart, so short clouds are ignored.
+          #    Not logged: routine sun tracking would bury the real events.
           - conditions:
               - condition: template
                 value_template: >
-                  {{ charging and (
-                       ((newt | float) - (cur | float) >= 1)
-                       or ((cur | float) - (newt | float) >= down_gate | float)
-                     ) }}
+                  {{ charging and lower_settled
+                     and (cur | float) - (lower_to | float) >= 1 }}
             sequence:
-              # Deliberately NOT logged. Routine surplus tracking is normal
-              # operation -- tens of writes an hour on a broken-cloud day -- and
-              # logging it would bury every real safety event in the logbook.
-              # The setpoint trajectory is already in the history of
-              # input_number.alfen_target_current.
               - service: script.alfen_set_current
                 data:
-                  amps: "{{ newt }}"
+                  amps: "{{ lower_to }}"
+
+          # 7) Follow the sun UP -- raising causes no restart, so no wait, but
+          #    never into the last step-up-buffer amps of fuse room, and not
+          #    during the guard's cooldown after it stepped in. Not logged.
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ charging and stop_cooldown_ok
+                     and (raise_to | float) - (cur | float) >= 1 }}
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ raise_to }}"
         default: []

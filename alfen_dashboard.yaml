@@ -25,20 +25,21 @@ views:
             content: >-
               <ha-alert alert-type="info">Modes</ha-alert>
 
-              **Off** — pauses the car. The charger stays connected but no
-              current is offered.
+              **Off** — the car stays plugged in but doesn't charge.
 
-              **Solar** — charges from solar surplus only. Always starts on
-              1-phase, modulates current to track surplus, and switches up to
-              3-phase when surplus sustains the phase-up threshold. Stops when
-              surplus drops below 1-phase minimum for the hold period.
+              **Solar** — charges only from electricity your panels would
+              otherwise send back to the grid. It starts slowly on one phase,
+              follows the sun up and down, and moves to three phases when
+              there's enough surplus. It pauses when the sun isn't strong
+              enough, unless *Keep charging at minimum* is on (see Solar tuning).
 
-              **Fast** — 3-phase at maximum current. Ignores surplus — will
-              import from grid. The fuse guard trims current down if a phase
-              nears the fuse limit and recovers when the load clears. Each
-              trim-down triggers a car re-negotiation (IEC 61851), so the guard
-              is deliberately reluctant to go down (step-down buffer) and waits
-              before recovering (post-stop cooldown).
+              **Fast** — charges as fast as the car and your fuses allow, using
+              grid power if needed. If the house is using a lot of power on
+              one phase, charging slows down automatically to protect the fuse,
+              and speeds back up when that load is gone.
+
+              **Force 1-Phase / 3-Phase** — switch the number of phases by hand.
+              Charging pauses for about 15 seconds while it switches.
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -77,17 +78,24 @@ views:
             content: >-
               <ha-alert alert-type="info">Limits</ha-alert>
 
-              **Max current** — car's charge-rate ceiling per phase. Suggested 16 A.
+              **Commanded current** — what the system is currently telling the
+              charger. Read-only in practice; the automations set it.
 
-              **Min current** — 6 A IEC floor. Charging never runs below this.
+              **Max current** — the most the car may draw per phase. Set this to
+              what your car can handle. Suggested 16 A.
 
-              **Stop current** — value written to pause the car (below 6 A). Suggested 5 A.
+              **Min current** — the lowest current charging can run at. 6 A is
+              the minimum every car and charger supports; leave it there.
 
-              **Fuse per phase** — TOTAL per-phase current cap (car + all
-              household devices on the phase). The fuse guard reads each
-              phase's load from the P1 meter and trims the car to keep every
-              phase under this. Set just below your real breaker (e.g. 24 A
-              under a 25 A fuse). Suggested 24 A.
+              **Stop current** — the value sent to pause the car. Anything
+              below 6 A pauses charging. Suggested 5 A.
+
+              **Fuse per phase** — the most current the whole house (car and
+              everything else) may use on one phase. Set it a little below your
+              main fuse, e.g. 24 A for a 25 A fuse.
+
+              **Price fallback** — the mode to return to when a cheap-price
+              window ends (only used if you've set up price-based charging).
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -96,7 +104,7 @@ views:
           - type: entities
             entities:
               - entity: input_number.alfen_target_current
-                name: ▸ Commanded current (live)
+                name: Commanded current
                 secondary_info: last-updated
               - entity: input_number.alfen_max_current
                 name: Max current — suggest 16
@@ -114,45 +122,43 @@ views:
 
           - type: markdown
             content: >-
-              <ha-alert alert-type="info">Fuse guard behavior</ha-alert>
+              <ha-alert alert-type="info">Fuse guard</ha-alert>
 
-              The guard runs every 20 s (matched to 10 s P1 meter). It is
-              **asymmetric** by design — going DOWN triggers a car
-              re-negotiation (IEC 61851), going UP does not:
+              The fuse guard checks every 20 seconds whether the house plus the
+              car still fits under *Fuse per phase*, and slows the car down if
+              not. It always runs, in every mode.
 
-              **Step-down buffer (A)** — minimum reduction before writing a
-              lower current. Small dips are tolerated rather than chased.
-              Higher = fewer re-negotiations, but this is a SAFETY buffer: the
-              car may sit this many amps above the fuse-per-phase budget, so
-              keep it at 1 A under a 25 A fuse with a 24 A budget. Suggested 1 A.
+              Many cars briefly stop and restart whenever the charging current is
+              **lowered**. Raising it causes no interruption. That's why the
+              guard is slow and careful about going down, and relaxed about
+              going back up.
 
-              **Step-up buffer (A)** — minimum headroom above current before
-              ramping back up. Prevents recovering too eagerly into marginal
-              headroom that will just trigger another trim. Suggested 2 A.
+              **Step-down buffer** — how far over the limit it must be before
+              the guard lowers the current. Keep this small, it's a safety
+              margin: the car can run this many amps over *Fuse per phase*
+              before the guard reacts. Suggested 1 A.
 
-              **Scale-down settle time (s)** — how long headroom must stay
-              below the trim threshold before the guard acts. Filters out
-              brief P1 meter blips and transient spikes so the guard only
-              reacts to real, sustained load changes. Suggested 40 s.
+              **Step-up buffer** — how much spare room there must be before the
+              guard raises the current again. Stops it from going straight back
+              up into a limit it just backed away from. Suggested 2 A.
 
-              **Scale-up settle time (s)** — how long headroom must stay
-              above the recovery threshold before ramping back up. Ensures
-              headroom is genuinely sustained, not a brief gap between clouds.
-              Suggested 60 s.
+              **Scale-down settle time** — how long the house must stay over the
+              limit before the guard lowers the current. Ignores short spikes,
+              like a kettle or a meter hiccup. Suggested 40 s.
 
-              **Scale-up cooldown (min)** — after any guard trim or stop,
-              the system waits this long before ramping back up. Prevents
-              up→down→up oscillation where each down costs a re-negotiation.
+              **Scale-up settle time** — how long there must be room again
+              before the guard raises the current. Suggested 60 s.
+
+              **Scale-up cooldown** — after the guard has lowered or stopped
+              charging, it waits at least this long before raising it again.
               Suggested 3 min.
 
-              **Sustained overload timeout (s)** — how long headroom must stay
-              below the 6 A floor before a full stop. Brief dips (clouds) are
-              ridden through at 6 A; only sustained overload triggers a stop.
-              Suggested 60 s.
+              **Sustained overload timeout** — if even the minimum 6 A doesn't
+              fit, how long to wait before stopping completely. Short overloads
+              are ridden out at 6 A. Suggested 60 s.
 
-              **Cloud ride-through:** cloud → trim to 6 A (one re-negotiation)
-              → hold through cloud → cloud clears → wait cooldown → ramp back
-              up (free). Car stays connected throughout.
+              **Last fuse-guard action** — when the guard last lowered or
+              stopped charging.
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -176,43 +182,48 @@ views:
                 name: Last fuse-guard action
 
           - type: heading
-            heading: Solar Phase Tuning
+            heading: Solar Tuning
 
           - type: markdown
             content: >-
               <ha-alert alert-type="info">Solar tuning</ha-alert>
 
-              **Phase up at (W)** — surplus needed (held for the phase switch
-              hold) before switching 1 → 3 phase. Higher = stays on 1-phase
-              longer, only switches with margin. Suggested 4800 W.
+              These settings only apply in **Solar** mode. Changes take effect
+              immediately.
 
-              **Phase down at (W)** — surplus below this (held for phase switch
-              hold) triggers 3 → 1 switch. Suggested 4140 W (3-phase minimum).
+              **Keep charging at minimum** — off: charging pauses when the sun
+              isn't strong enough. On: the car always charges at least at 6 A,
+              plus whatever the sun adds on top. Turn this on if your car
+              doesn't like being stopped and restarted often; the price is some
+              grid power on cloudy days. It still stops if the fuse can't take
+              6 A.
 
-              **Phase switch cooldown** — min time between any two phase
-              switches in either direction. Main anti-thrash guard. Suggested 12 min.
+              **Start/stop hold** — how long the sun must be strong enough (or
+              too weak) before charging starts or pauses. Longer means fewer
+              stops on cloudy days. Suggested 3 min.
 
-              **Start/stop hold** — how long surplus must stay above (start) or
-              below (stop) the 1-phase minimum before Solar acts. Prevents
-              flapping on clouds. Suggested 3 min.
+              **Phase up at** — how much surplus is needed before switching from
+              one to three phases. Three phases need at least about 4.1 kW, so
+              setting this higher gives a margin. Set it to the maximum to never
+              use three phases in Solar. Suggested 4800 W.
 
-              **Phase switch hold** — how long surplus must persist before a
-              1↔3 switch. Separate from start/stop so phase changes can be more
-              conservative. Suggested 3 min.
+              **Phase down at** — below this surplus it goes back to one phase.
+              Suggested 4140 W.
 
-              **Solar step-down buffer** — how far the surplus target must fall
-              below the commanded current before Solar writes a lower value.
-              Lowering the current makes the car re-negotiate, so this damps the
-              constant down-writes that passing clouds would otherwise cause.
-              Raising the current is free and still happens on 1 A. Suggested
-              2 A (≈ halves the writes on a cloudy hour, at ~100 W average grid
-              import). 3 A is calmer still but imports ~250 W. Safety is not
-              affected: when the **fuse headroom** is what caps the target, the
-              buffer drops to 1 A automatically and the fuse guard trims as
-              usual.
+              **Phase switch hold** — how long the surplus must stay above or
+              below those levels before switching. Suggested 3 min.
 
-              *After changing a hold value, reload automations for it to take
-              effect. Thresholds, buffers and cooldown apply immediately.*
+              **Phase switch cooldown** — the minimum time between two phase
+              switches. Each switch pauses charging for about 15 seconds, so
+              this stops it switching back and forth. Suggested 12 min.
+
+              **Solar step-down buffer** — how far the sun must drop before
+              charging slows down. Small dips from passing clouds are ignored,
+              so the car isn't slowed down (and possibly restarted) every few
+              seconds. Higher is calmer but uses a bit more grid power.
+              Suggested 2 A. This never delays slowing down to protect the fuse.
+
+              **Last phase switch** — when the phases last changed.
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
@@ -220,16 +231,18 @@ views:
 
           - type: entities
             entities:
+              - entity: input_boolean.alfen_solar_keep_min
+                name: Keep charging at minimum
+              - entity: input_number.alfen_solar_hold
+                name: Start/stop hold — suggest 3
               - entity: input_number.alfen_phase_up_threshold
                 name: ▲ Phase up at — suggest 4800
               - entity: input_number.alfen_phase_down_threshold
                 name: ▼ Phase down at — suggest 4140
-              - entity: input_number.alfen_phase_cooldown
-                name: Phase switch cooldown — suggest 12
-              - entity: input_number.alfen_solar_hold
-                name: Start/stop hold — suggest 3
               - entity: input_number.alfen_phase_hold
                 name: Phase switch hold — suggest 3
+              - entity: input_number.alfen_phase_cooldown
+                name: Phase switch cooldown — suggest 12
               - entity: input_number.alfen_solar_step_down_buffer
                 name: Solar step-down buffer — suggest 2
               - entity: input_datetime.alfen_last_phase_switch
@@ -299,10 +312,10 @@ views:
             name: Grid L3
 
           - type: entities
-            title: Fuse Headroom Breakdown
+            title: Fuse headroom (amps still available per phase)
             entities:
               - entity: sensor.alfen_headroom_active
-                name: Active Headroom (Governing)
+                name: Room left for the car
               - entity: sensor.alfen_headroom_l1
                 name: Headroom L1 (A)
               - entity: sensor.alfen_headroom_l2
@@ -310,30 +323,29 @@ views:
               - entity: sensor.alfen_headroom_l3
                 name: Headroom L3 (A)
               - entity: input_number.alfen_fuse_per_phase
-                name: Fuse per phase (total cap)
+                name: Fuse per phase
 
           - type: heading
-            heading: Safety Event Log
+            heading: Event Log
 
           - type: markdown
             content: >-
-              <ha-alert alert-type="info">What gets logged</ha-alert>
+              <ha-alert alert-type="info">Event log</ha-alert>
 
-              Only events that change what the car is allowed to draw, and only
-              the ones you can't reconstruct from the charts afterwards:
+              Shows the decisions that changed how much the car may draw, so you
+              can see afterwards *why* charging slowed down, stopped or
+              switched phases:
 
-              **Fuse guard** — every trim down, every recovery up, and any
-              sustained-overload stop, with the headroom reading that caused it.
+              - fuse guard slowing down, speeding back up, or stopping
 
-              **Solar** — start, stop, and pause when the fuse headroom drops
-              below the 6 A floor.
+              - Solar starting, pausing, or pausing because the fuse was full
 
-              **Phase switches** — every 1↔3 change, including the manual
-              buttons above.
+              - the car being unplugged or reporting a fault
 
-              Routine surplus tracking is **not** logged. On a broken-cloud day
-              that is tens of setpoint writes an hour and would bury everything
-              else. Watch *Commanded current* in the chart for that.
+              - every phase switch, including the Force buttons
+
+              Normal up-and-down following of the sun is **not** logged; it
+              would fill the log. The *Commanded current* history shows that.
             visibility:
               - condition: state
                 entity: input_boolean.alfen_dashboard_show_help
