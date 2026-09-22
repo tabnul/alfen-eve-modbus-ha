@@ -204,13 +204,26 @@ template:
           {{ head >= (cur + buf) and cur < maxc }}
 
   - sensor:
-      # Human-readable Mode 3 (IEC 61851) label for the dashboard. Display only —
-      # the automations read raw sensor.alfen_mode3_state directly.
+      # Cleaned Mode 3 (IEC 61851) state. The charger returns the state as a
+      # 10-byte string register (1201-1205): 'A' arrives as 'A' plus 9 padding
+      # bytes, so the raw sensor NEVER equals 'A'. Every automation must read
+      # THIS sensor, never sensor.alfen_mode3_state -- comparing the raw value
+      # silently turns every "is a car connected?" check into always-true.
+      # Becomes unavailable (not a string) when the raw read fails.
+      - name: alfen_mode3
+        unique_id: alfen_mode3
+        icon: mdi:ev-plug-type2
+        availability: >
+          {{ states('sensor.alfen_mode3_state') not in ['unknown','unavailable'] }}
+        state: >
+          {{ states('sensor.alfen_mode3_state') | upper | regex_replace('[^A-Z0-9]', '') }}
+
+      # Human-readable Mode 3 label for the dashboard. Display only.
       - name: alfen_mode3_text
         unique_id: alfen_mode3_text
         icon: mdi:ev-station
         state: >
-          {% set s = states('sensor.alfen_mode3_state').split('\x00')[0] | trim %}
+          {% set s = states('sensor.alfen_mode3') %}
           {% set m = {
             'A':  'No vehicle connected',
             'B':  'Vehicle connected',
@@ -405,7 +418,7 @@ automation:
     conditions:
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
+          {{ states('sensor.alfen_mode3')
              not in ['A','E','F','unknown','unavailable'] }}
     actions:
       - service: script.alfen_set_current
@@ -429,7 +442,7 @@ automation:
     conditions:
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
+          {{ states('sensor.alfen_mode3')
              not in ['A','E','F','unknown','unavailable'] }}
       - condition: template
         value_template: >
@@ -556,8 +569,8 @@ automation:
         # Solar with headroom >= min: modulate loop handles it. Nothing to do.
         default: []
 
-  # --- Mode routing: deliberate mode selection (or HA start) ONLY.
-  #     Deliberately NOT triggered by sensor.alfen_mode3_state. This automation
+  # --- Mode routing: mode selection, HA start, or car plug-in (Mode 3 leaving A).
+  #     Deliberately NOT triggered by any OTHER Mode 3 change. This automation
   #     calls alfen_switch_phases, which pauses the car for 10 s -- and that pause
   #     changes the Mode 3 state (C2 -> B1/B2). With a mode3 trigger plus
   #     mode: restart, that state change re-triggered this automation, which
@@ -575,6 +588,15 @@ automation:
         entity_id: input_select.alfen_charge_mode
       - trigger: homeassistant
         event: start
+      # Car plugged in. The keep-alive stops while unplugged, so the charger's
+      # setpoint has expired and it would otherwise start the car at its own
+      # Safe current, whatever the selected mode, until the keep-alive's next
+      # tick. This applies the mode immediately instead.
+      # Safe with mode: restart: a phase switch moves Mode 3 between C and B,
+      # never out of A, so this can't fire mid-switch and cancel the script.
+      - trigger: state
+        entity_id: sensor.alfen_mode3
+        from: "A"
     actions:
       - choose:
           # Off, or no car / error state -> pause.
@@ -582,7 +604,7 @@ automation:
               - condition: template
                 value_template: >
                   {{ is_state('input_select.alfen_charge_mode','Off')
-                     or states('sensor.alfen_mode3_state')
+                     or states('sensor.alfen_mode3')
                         in ['A','E','F','unknown','unavailable'] }}
             sequence:
               - service: script.alfen_set_current
@@ -608,6 +630,21 @@ automation:
                   amps: >
                     {{ [ states('input_number.alfen_max_current') | float(16),
                          states('sensor.alfen_headroom_active') | float(99) ] | min }}
+          # Solar -> hold the car paused until the Solar loop decides to start.
+          # Only matters on plug-in (overrides the charger's Safe-current
+          # fallback); on a mode selection the loop takes over within 20 s.
+          - conditions:
+              - condition: state
+                entity_id: input_select.alfen_charge_mode
+                state: "Solar"
+              - condition: template
+                value_template: >
+                  {{ states('input_number.alfen_target_current') | float(0)
+                     < states('input_number.alfen_min_current') | float(6) }}
+            sequence:
+              - service: script.alfen_set_current
+                data:
+                  amps: "{{ states('input_number.alfen_stop_current') | float(5) }}"
         default: []
 
   # --- Car disconnected or faulted -> pause. Split out of the mode routing so
@@ -617,14 +654,16 @@ automation:
     alias: Alfen disconnect pause
     mode: single
     max_exceeded: silent
+    # A (unplugged), E (no supply) or F (charger unavailable), held 10 s so a
+    # single bad poll can't pause the car. A failed Modbus READ (unknown /
+    # unavailable) is deliberately not a trigger: the charger keeps running on
+    # its own setpoint, and a read glitch is not a disconnect.
     triggers:
       - trigger: state
-        entity_id: sensor.alfen_mode3_state
+        entity_id: sensor.alfen_mode3
+        to: ["A", "E", "F"]
+        for: "00:00:10"
     conditions:
-      - condition: template
-        value_template: >
-          {{ states('sensor.alfen_mode3_state')
-             in ['A','E','F','unknown','unavailable'] }}
       # Only act if we currently believe we are charging -- otherwise every
       # mode3 flicker on an empty charger would rewrite the setpoint.
       - condition: template
@@ -637,7 +676,7 @@ automation:
           name: Alfen
           entity_id: input_boolean.alfen_events
           message: >-
-            PAUSE — Mode 3 state is {{ states('sensor.alfen_mode3_state') }}
+            PAUSE — Mode 3 state is {{ states('sensor.alfen_mode3') }}
             (car disconnected or not supplying). Was at
             {{ states('input_number.alfen_target_current') | round(0) }} A.
       - service: script.alfen_set_current
@@ -665,7 +704,7 @@ automation:
         state: "Solar"
       - condition: template
         value_template: >
-          {{ states('sensor.alfen_mode3_state')
+          {{ states('sensor.alfen_mode3')
              not in ['A','E','F','unknown','unavailable'] }}
       # Same guard as the fuse guard above. This loop blocks itself while it
       # calls the switch script (mode: single), but a switch started elsewhere

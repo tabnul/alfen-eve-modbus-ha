@@ -246,8 +246,8 @@ views:
             name: EV Status
             icon: mdi:car-electric
           - type: tile
-            entity: sensor.alfen_mode3_state
-            name: Mode 3 (raw)
+            entity: sensor.alfen_mode3
+            name: Mode 3
           - type: tile
             entity: sensor.alfen_phases
             name: Active Phases
