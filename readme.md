@@ -23,6 +23,36 @@ In every mode:
 
 ---
 
+## The dashboard
+
+Four tabs, split by how often you need them. Day to day you only use the first one.
+
+### Charge
+
+Mode, the two Force-phase buttons, what the charger is doing right now, the event log and a 6-hour power chart. If the meter stops working, a warning appears here too.
+
+![The Charge tab](docs/dashboard-charge.png)
+
+### Tuning
+
+Everything you can adjust: limits, the fuse guard and Solar. Switch *Show Help Explanations* on and each group explains what its settings do and what to set them to.
+
+![The Tuning tab](docs/dashboard-tuning.png)
+
+### Setup
+
+Your meter sensors with the *Meter OK* indicator, and the charger's own details (firmware, serial, hardware limit, uptime). Normally you only come here when installing.
+
+![The Setup tab](docs/dashboard-setup.png)
+
+### Diagnostics
+
+Per-phase and per-register detail for when something looks wrong: Modbus state, grid power and headroom per phase, and the charger's own current and voltage readings.
+
+![The Diagnostics tab](docs/dashboard-diagnostics.png)
+
+---
+
 ## Why it is careful about lowering the current
 
 Many cars briefly stop and restart charging whenever the charger **lowers** the current. Raising it causes no interruption. Frequent restarts are annoying at best, and occasionally a car doesn't come back cleanly.
@@ -80,7 +110,7 @@ The package consists of these files:
 | --- | --- | --- |
 | `alfen_modbus.yaml` | Reads every charger value as a sensor | Include from `configuration.yaml`: `modbus: !include alfen_modbus.yaml` |
 | `packages/alfen.yaml` | The control logic: settings, sensors, scripts, automations | Your `packages/` folder |
-| `alfen_dashboard.yaml` | The dashboard, with optional help text | Paste into a dashboard's raw configuration editor |
+| `alfen_dashboard.yaml` | The dashboard: four tabs, with optional help text | Paste over a dashboard's **whole** raw configuration |
 
 If packages aren't enabled yet, add this to `configuration.yaml`:
 
@@ -103,18 +133,18 @@ Doing it step by step means that if something fails, you know which part it is.
 
 1. **Check the connection.** Load `alfen_modbus.yaml` and restart. The charger sensors should fill in: voltages around 230 V, a sensible temperature.
 2. **Check that commands arrive.** Load the package and restart. In Developer Tools, run `script.alfen_set_current` with `amps: 6`. *Setpoint readback* should show 6 and *Setpoint accounted for* should show 1. If so, Home Assistant can control the charger.
-3. **Set up your meter and fuse limit** before anything else. Check the four meter sensors under *Smart meter* (they start with the HomeWizard names; change them if yours differ) and make sure *Meter OK* is on. Until then charging is held at 6 A. Then set *Fuse per phase*. Wrong values here affect everything.
+3. **Set up your meter and fuse limit** before anything else. On the **Setup** tab, check the four meter sensors (they start with the HomeWizard names; change them if yours differ) and make sure *Meter OK* is on. Until then charging is held at 6 A. Then set *Fuse per phase* on the **Tuning** tab. Wrong values here affect everything.
 4. **Try the modes.** Try Fast, Solar and the Force 1-Phase / 3-Phase buttons. In Fast, switch on a big appliance and watch the car slow down, then speed up again when it's off. This is deliberately not instant: slowing down waits about 40 seconds, speeding up about a minute plus a 3-minute cooldown.
 5. **Try Solar on a cloudy day.** Look at the history of *Commanded current*. Short clouds should be ignored and it should change in steady steps, not jump every 20 seconds. If it still follows every cloud, make the *Slow-down wait* longer.
-6. **Check the event log** on the dashboard. A Force-phase button press is the quickest way to create an entry.
+6. **Check the event log** on the **Charge** tab. A Force-phase button press is the quickest way to create an entry.
 
 ---
 
 ## Settings
 
-Everything is adjustable from the dashboard; you never need to edit the code. Your values are kept across restarts. Each setting shows a suggested value, which is also used if a setting is ever left empty.
+Everything is adjustable from the dashboard; you never need to edit the code. Your values are kept across restarts. Each setting shows a suggested value, which is also used if a setting is ever left empty. Switch *Show Help Explanations* on to get the same explanations next to the settings themselves.
 
-### Limits
+### Limits *(Tuning tab)*
 
 | Setting | What it does | Suggested |
 | --- | --- | --- |
@@ -123,7 +153,7 @@ Everything is adjustable from the dashboard; you never need to edit the code. Yo
 | Stop current | The value sent to pause the car. Anything below 6 A pauses charging. | 5 A |
 | Fuse per phase | The most current the whole house (car plus everything else) may use on one phase. Set a little below your main fuse. | e.g. 24 A for a 25 A fuse |
 
-### Smart meter
+### Smart meter *(Setup tab)*
 
 | Setting | What it does | Filled in on first start |
 | --- | --- | --- |
@@ -135,7 +165,7 @@ On first start the four fields are filled in with the names a HomeWizard P1 mete
 
 **If the meter doesn't work** (*Meter OK* off for more than 30 seconds), the car is held at the minimum current (6 A) until it works again. Without meter data the fuse can't be protected, so this is the safe choice. Solar also stops making its own decisions until then, and the event log shows what happened. The 30 seconds ignore short hiccups and the meter still starting up after a Home Assistant restart.
 
-### Fuse guard
+### Fuse guard *(Tuning tab)*
 
 The fuse guard checks every 20 seconds, in every mode — Solar included — so your fuse is protected the same way whatever mode you use.
 
@@ -150,7 +180,7 @@ The fuse guard checks every 20 seconds, in every mode — Solar included — so 
 
 **The step-down buffer is a safety margin, not a comfort setting.** The car can run this many amps over *Fuse per phase* before the guard reacts. With 24 A under a 25 A fuse, a 1 A buffer means the worst case is exactly your fuse rating; 2 A would go over it. Only raise it if you've left a bigger gap between *Fuse per phase* and your real fuse.
 
-### Solar
+### Solar *(Tuning tab)*
 
 These only apply in Solar mode, and changes take effect immediately.
 
@@ -210,7 +240,7 @@ Put it in `automations.yaml` or in a package file of your own, not in `packages/
 
 ## The event log
 
-The dashboard shows a 48-hour log of every decision that changed what the car may draw:
+The **Charge** tab shows a 48-hour log of every decision that changed what the car may draw:
 
 - the fuse guard slowing down, speeding back up, or stopping
 - Solar starting or pausing
